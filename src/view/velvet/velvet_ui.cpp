@@ -814,7 +814,7 @@ lv_obj_t* VelvetUI::status_pill(lv_obj_t* parent, int32_t right, int32_t y, bool
 // MinUI's main list: a title pill and the status pill on top, five rows (a white pill on the
 // selected one), button hints along the bottom.
 void VelvetUI::build_hub(lv_obj_t* p) {
-    text_pill(p, "CardputerZero", f_.mono10, kDark, kWhite, 4, 4, 20, 10);
+    text_pill(p, "Optic Suite", f_.mono10, kDark, kWhite, 4, 4, 20, 10);
     hub_status_ = status_pill(p, 316, 4, true);
 
     hub_plate_ = pill(p, 4, kHubY0, 302, kHubRowH, kWhite);

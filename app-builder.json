@@ -1,7 +1,7 @@
 {
   "app_name": "Optic Suite",
   "package_name": "optic-cardputerzero",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "The Optic UI for the M5Stack CardputerZero",
   "store": {
     "summary": "A full shell for your CardputerZero: terminal, browser, music, camera and more.",
@@ -26,9 +26,9 @@
     "permissions": {
       "camera": true,
       "microphone": false,
-      "imu": false,
+      "imu": true,
       "network": true,
-      "additional_hardware": false,
+      "additional_hardware": true,
       "background_service": false,
       "external_display": true
     }
