@@ -3,6 +3,7 @@
 // so every glyph stays on the pixel grid.
 #include "lcdfb.h"
 #include "velvet_ui.h"
+#include "legacy.h"
 #include "wordmark.h"
 #include "egg_art.h"
 #include "keys.h"
@@ -572,13 +573,17 @@ bool write_png(const std::string& path, lv_draw_buf_t* snap) {
 // =====================================================================
 
 namespace {
-// Small settings, one number per file in ~/.config/velvet/<name>.
+// Small settings, one number per file in ~/.config/optic-suite/<name>.
 std::string setting_file(const char* name) {
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     const char* home = std::getenv("HOME");
-    if (xdg && xdg[0]) return std::string(xdg) + "/velvet/" + name;
-    if (home && home[0]) return std::string(home) + "/.config/velvet/" + name;
-    return {};
+    std::string base;
+    if (xdg && xdg[0]) base = xdg;
+    else if (home && home[0]) base = std::string(home) + "/.config";
+    else return {};
+    static bool adopted = false;
+    if (!adopted) { adopted = true; adopt_old_dir(base + "/velvet", base + "/optic-suite"); }
+    return base + "/optic-suite/" + name;
 }
 
 #ifdef __EMSCRIPTEN__
@@ -3246,14 +3251,14 @@ void VelvetUI::browser_go(const std::string& url_raw, bool remember) {
             browser_full_search(q);
             return;
         }
-        if (url_in.rfind("velvet:", 0) == 0) {
+        if (url_in.rfind("optic:", 0) == 0) {
             btab().loading = true;
             chrome_->home();
             browser_render();
             return;
         }
     }
-    if (bfull_ && chrome_ && url_in.rfind("velvet:", 0) != 0) {  // Chromium keeps its own history
+    if (bfull_ && chrome_ && url_in.rfind("optic:", 0) != 0) {  // Chromium keeps its own history
         BTab& tab = btab();
         tab.url = url_in;
         tab.loading = true;
@@ -3289,7 +3294,7 @@ void VelvetUI::browser_go(const std::string& url_raw, bool remember) {
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
         browser_show(tab, parse_html("<title>Can't open</title><h1>CAN'T OPEN</h1><p>Only web pages (http / https) "
                                      "open here:</p><pre>" + url + "</pre><p><a href='https://duckduckgo.com/'>DuckDuckGo</a></p>",
-                                     "velvet:error"));
+                                     "optic:error"));
         browser_render();
         return;
     }
@@ -3324,7 +3329,7 @@ void VelvetUI::browser_go(const std::string& url_raw, bool remember) {
         } else if (!ok) {
             sound_->play(Sfx::Error);
             browser_show(t, parse_html("<title>Can't load</title><h1>CAN'T LOAD</h1><p>" + err + "</p><pre>" + t.url +
-                                           "</pre><p>R reloads. Or search:</p><form action='velvet:search'>"
+                                           "</pre><p>R reloads. Or search:</p><form action='optic:search'>"
                                            "<input name='q' placeholder='Search'><input type='submit' value='SEARCH'>"
                                            "</form><p><a href='https://en.wikipedia.org/wiki/Special:Random'>Wikipedia: "
                                            "random article</a></p>",
@@ -3617,7 +3622,7 @@ void VelvetUI::browser_set_engine(bool full) {
                                        "Chromium, which needs about 1 GB of memory. This device has " +
                                            std::to_string(mem_kb / 1024) +
                                            " MB.</p><p>The FAST engine shows pages here. Press ESC to go back.</p>",
-                                       "velvet:full"));
+                                       "optic:full"));
             browser_render();
             return;
         }
@@ -3632,7 +3637,7 @@ void VelvetUI::browser_set_engine(bool full) {
             BTab& t = btab();
             browser_show(t, parse_html("<title>FULL engine</title><h1>FULL NEEDS CHROMIUM</h1><p>" + err +
                                            "</p><p>Then press F2 again. Until then the FAST engine shows pages.</p>",
-                                       "velvet:full"));
+                                       "optic:full"));
             browser_render();
             return;
         }
@@ -3648,7 +3653,7 @@ void VelvetUI::browser_set_engine(bool full) {
     } else {
         bfull_ = false;
         if (chrome_) chrome_->stop();
-        browser_go(btab().url.rfind("velvet:", 0) == 0 ? std::string(kBrowserHome) : btab().url, false);
+        browser_go(btab().url.rfind("optic:", 0) == 0 ? std::string(kBrowserHome) : btab().url, false);
     }
     save_setting("browser_engine", bfull_ ? 1 : 0);
     if (bview_) lv_obj_invalidate(bview_);
@@ -3667,16 +3672,16 @@ void VelvetUI::browser_full_tick() {
             bfull_ = false;
             browser_show(t, parse_html("<title>FULL engine</title><h1>NO FULL ENGINE</h1><p>" + st.error +
                                            "</p><p>Press F2 to try again. Meanwhile pages open in the FAST engine.</p>"
-                                           "<form action='velvet:search'><input name='q' placeholder='Search'>"
+                                           "<form action='optic:search'><input name='q' placeholder='Search'>"
                                            "<input type='submit' value='SEARCH'></form>",
-                                       "velvet:full"));
+                                       "optic:full"));
             browser_render();
         }
         return;
     }
     if (bcap_at_[0] == 1) {  // first frame after starting: open the tab's page
         bcap_at_[0] = 0;
-        const std::string url = t.url.empty() || t.url.rfind("velvet:", 0) == 0 ? std::string(kBrowserHome) : t.url;
+        const std::string url = t.url.empty() || t.url.rfind("optic:", 0) == 0 ? std::string(kBrowserHome) : t.url;
         browser_go(url, false);
     }
     if (st.loads != bfull_loads_) {  // a page finished loading
@@ -6319,7 +6324,7 @@ void VelvetUI::autoshot_cb(lv_timer_t* t) {
         if (top) lv_draw_buf_destroy(top);
         if (snap) {
             const std::string path = self->shot_dir_ + "/" + cur.shot + ".png";
-            std::printf("[velvet] shot %s %s\n", path.c_str(), write_png(path, snap) ? "ok" : "FAILED");
+            std::printf("[optic] shot %s %s\n", path.c_str(), write_png(path, snap) ? "ok" : "FAILED");
             lv_draw_buf_destroy(snap);
         }
     }

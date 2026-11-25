@@ -147,7 +147,7 @@ std::string attr(const std::string& tag, const char* name) {
 
 std::string resolve_url(const std::string& base, const std::string& href) {
     if (href.empty()) return base;
-    if (href.find("://") != std::string::npos || href.rfind("mailto:", 0) == 0 || href.rfind("velvet:", 0) == 0) return href;
+    if (href.find("://") != std::string::npos || href.rfind("mailto:", 0) == 0 || href.rfind("optic:", 0) == 0) return href;
     const size_t scheme_end = base.find("://");
     if (scheme_end == std::string::npos) return href;
     const std::string scheme = base.substr(0, scheme_end);
@@ -188,7 +188,7 @@ std::string normalize_input(const std::string& typed) {
     while (!t.empty() && t.back() == ' ') t.pop_back();
     while (!t.empty() && t.front() == ' ') t.erase(0, 1);
     if (t.empty()) return "https://duckduckgo.com/";
-    if (t.rfind("velvet:", 0) == 0 || t.find("://") != std::string::npos) return t;
+    if (t.rfind("optic:", 0) == 0 || t.find("://") != std::string::npos) return t;
     if (t.find(' ') == std::string::npos && t.find('.') != std::string::npos) return "https://" + t;
     return search_url(t);
 }
@@ -348,7 +348,7 @@ std::string search_url(const std::string& query) {
 std::string form_url(const Doc& doc, int form, const std::vector<std::string>& values) {
     if (form < 0 || form >= static_cast<int>(doc.forms.size())) return doc.url;
     const Form& f = doc.forms[form];
-    if (f.action.rfind("velvet:search", 0) == 0) {
+    if (f.action.rfind("optic:search", 0) == 0) {
         for (size_t i = 0; i < doc.fields.size(); ++i) {
             if (doc.fields[i].form == form && doc.fields[i].type == "text") return search_url(values[i]);
         }
@@ -423,7 +423,7 @@ bool search_results_html(const std::string& url, const std::string& body, std::s
         }
     }
     html = "<title>Search: " + html_escape(query) + "</title><h1>" + html_escape(query) +
-           "</h1><form action='velvet:search'><input name='q' value='" + html_escape(query) +
+           "</h1><form action='optic:search'><input name='q' value='" + html_escape(query) +
            "'><input type='submit' value='SEARCH'></form><p>Wikipedia results</p><ul>";
     size_t p = 0;
     int n = 0;
@@ -1199,7 +1199,7 @@ lv_draw_buf_t* decode_image(const std::string& bytes, int max_w, int max_h) {
 
 // ======================================================================== built-in pages
 bool builtin_page(const std::string& url, std::string& html) {
-    if (url == "velvet:help") {
+    if (url == "optic:help") {
         html =
             "<title>Browser keys</title><h1>KEYS</h1><h2>Reading</h2><ul>"
             "<li>F / X: scroll up / down</li><li>Z / C: previous / next link</li><li>OK: open the link</li>"
@@ -1352,7 +1352,7 @@ private:
         Result r;
         r.url = url;
         const std::string proxy = tor_proxy();
-        char path[] = "/tmp/velvet-page-XXXXXX";
+        char path[] = "/tmp/optic-page-XXXXXX";
         const int tmp = mkstemp(path);
         if (tmp < 0) {
             r.err = "no temp file";
@@ -1377,10 +1377,10 @@ private:
             if (!proxy.empty())
                 execlp("curl", "curl", "-sSL", "--compressed", "--max-time", "60", "--max-filesize", "6000000",
                        "--proxy", proxy.c_str(),
-                       "-A", "Mozilla/5.0 (Linux; CardputerZero) Velvet/1.0", "-o", path, "-w",
+                       "-A", "Mozilla/5.0 (Linux; CardputerZero) OpticSuite/1.0", "-o", path, "-w",
                        "%{url_effective}\n%{content_type}\n%{http_code}", "--", url.c_str(), static_cast<char*>(nullptr));
             execlp("curl", "curl", "-sSL", "--compressed", "--max-time", "25", "--max-filesize", "6000000",
-                   "-A", "Mozilla/5.0 (Linux; CardputerZero) Velvet/1.0", "-o", path, "-w",
+                   "-A", "Mozilla/5.0 (Linux; CardputerZero) OpticSuite/1.0", "-o", path, "-w",
                    "%{url_effective}\n%{content_type}\n%{http_code}", "--", url.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }

@@ -276,7 +276,7 @@ lv_display_t* init_device_display() {
 
 int Application::run() {
     logger::Logger::init();
-    logger::Logger::set_tag("velvet");
+    logger::Logger::set_tag("optic");
 
     lv_init();
 

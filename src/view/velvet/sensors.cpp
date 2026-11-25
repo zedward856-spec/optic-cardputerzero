@@ -1,3 +1,4 @@
+#include "legacy.h"
 #include "sensors.h"
 
 #include "lvgl.h"
@@ -296,13 +297,16 @@ std::string photo_dir() {
     // The SD card mounts at /media/SD Card on the CardputerZero.
     for (const char* sd : {"/media/SD Card", "/media/sd", "/mnt/sd"}) {
         if (fs::is_directory(sd, ec) && access(sd, W_OK) == 0) {
-            const std::string d = std::string(sd) + "/DCIM/Velvet";
+            adopt_old_dir(std::string(sd) + "/DCIM/Velvet", std::string(sd) + "/DCIM/Optic");
+            const std::string d = std::string(sd) + "/DCIM/Optic";
             fs::create_directories(d, ec);
             if (!ec) return d;
         }
     }
     const char* home = std::getenv("HOME");
-    const std::string d = std::string(home ? home : "/tmp") + "/Pictures/Velvet";
+    const std::string pics = std::string(home ? home : "/tmp") + "/Pictures";
+    adopt_old_dir(pics + "/Velvet", pics + "/Optic");
+    const std::string d = pics + "/Optic";
     fs::create_directories(d, ec);
     return d;
 }
@@ -366,7 +370,7 @@ public:
             // the sensor can only be opened once: pause the viewfinder for the still
             const bool was = running_;
             stop_stream();
-            const std::string path = photo_dir() + "/velvet-" + stamp() + ".jpg";
+            const std::string path = photo_dir() + "/optic-" + stamp() + ".jpg";
             const pid_t p = fork();
             if (p == 0) {
                 const int devnull = open("/dev/null", O_RDWR);
@@ -585,7 +589,7 @@ std::string photos_dir() {
 // The page hands each photo it saved to the phone over here too, so the GALLERY can show it.
 extern "C" EMSCRIPTEN_KEEPALIVE void velvet_photo_add(const unsigned char* data, int len, double stamp) {
     char name[64];
-    std::snprintf(name, sizeof name, "/photos/velvet-%.0f.jpg", stamp);
+    std::snprintf(name, sizeof name, "/photos/optic-%.0f.jpg", stamp);
     std::error_code ec;
     std::filesystem::create_directories("/photos", ec);
     if (FILE* f = std::fopen(name, "wb")) {

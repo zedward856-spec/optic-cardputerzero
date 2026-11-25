@@ -320,7 +320,7 @@ bool ChromeEngine::start(std::string& error) {
         return false;
     }
     const char* home = std::getenv("HOME");
-    const std::string profile = std::string(home ? home : "/tmp") + "/.cache/velvet/chromium";
+    const std::string profile = std::string(home ? home : "/tmp") + "/.cache/optic-suite/chromium";
     std::error_code ec;
     std::filesystem::create_directories(profile, ec);
     int a[2], b[2];

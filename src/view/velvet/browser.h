@@ -122,7 +122,7 @@ public:
 };
 std::unique_ptr<Fetcher> make_fetcher();
 
-// Built-in pages: "velvet:start", "velvet:help".
+// Built-in pages: "optic:start", "optic:help".
 bool builtin_page(const std::string& url, std::string& html);
 
 }  // namespace velvet

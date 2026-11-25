@@ -1,3 +1,4 @@
+#include "legacy.h"
 #include "netlink.h"
 
 #include <atomic>
@@ -108,7 +109,7 @@ class LinuxTor : public Tor {
 public:
     // "On" = Tor running and wanted (the 'on' file). Turning it off only stops using it: Tor
     // stays up, warm, so turning it on again is instant instead of another bootstrap.
-    LinuxTor() : dir_(home() + "/.local/share/velvet-tor") {
+    LinuxTor() : dir_((adopt_old_dir(home() + "/.local/share/velvet-tor", home() + "/.local/share/optic-tor"), home() + "/.local/share/optic-tor")) {
         // a Tor from a previous run is still ours
         g_tor_up = wanted() && pid() > 0 && percent_now() == 100;
     }
@@ -145,7 +146,7 @@ public:
             // Pi OS lets the user install without a password; if not, say how
             installing_ = true;
             std::thread([this] {
-                const int r = std::system("sudo -n apt-get install -y -q tor >/tmp/velvet-tor-install.log 2>&1");
+                const int r = std::system("sudo -n apt-get install -y -q tor >/tmp/optic-tor-install.log 2>&1");
                 have_ = on_path("tor");
                 installing_ = false;
                 if (!have_) { std::lock_guard<std::mutex> l(m_); err_ = r ? "NEEDS: sudo apt install tor" : "INSTALL FAILED"; return; }
@@ -223,7 +224,8 @@ public:
     std::string peer() override { return peer_; }
     void set_on(bool on) override {
         if (on && !l_) {
-            const std::string dir = home() + "/.config/velvet";
+            adopt_old_dir(home() + "/.config/velvet", home() + "/.config/optic-suite");
+            const std::string dir = home() + "/.config/optic-suite";
             mkdir((home() + "/.config").c_str(), 0755);
             mkdir(dir.c_str(), 0755);
             char host[64] = "";
