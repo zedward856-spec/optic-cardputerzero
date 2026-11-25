@@ -4,6 +4,7 @@
 // call is a quiet no-op.
 #pragma once
 
+#include <string>
 #include <memory>
 
 namespace velvet {
@@ -22,7 +23,20 @@ public:
 
 private:
     struct Impl;
+    friend struct SoundAccess;
     std::unique_ptr<Impl> impl_;
 };
+
+// Music decoded inside the app (MP3, FLAC, WAV) and mixed into the same output as the effects:
+// it starts at once, where an outside player takes seconds to load on a CardputerZero.
+namespace inapp {
+bool open(const std::string& path);   // false: no output, or a format this can't decode (m4a...)
+void stop();
+void pause(bool paused);
+void seek(double seconds);
+double pos();                          // seconds played
+double length(const std::string& path);   // seconds, 0 if unknown (reads the file: not for the UI thread)
+bool ended();                          // the file ran out (stays true until stop / open)
+}  // namespace inapp
 
 }  // namespace velvet

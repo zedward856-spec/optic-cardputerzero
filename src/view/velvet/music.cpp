@@ -1,4 +1,5 @@
 #include "music.h"
+#include "sound.h"
 
 #include <algorithm>
 #include <cctype>
@@ -497,17 +498,27 @@ public:
                     std::lock_guard<std::mutex> l(m_);
                     url_ = t.path;
                     aurl_.clear();
-                    start_at(0);
+                    if (inapp::open(t.path)) {          // MP3 / FLAC / WAV: decoded here, starts at once
+                        kill_player();
+                        inapp_ = true;
+                        paused_ = false;
+                        sounding_ = true;
+                    } else {
+                        start_at(0);
+                    }
                     busy_ = false;
                     gen = start_gen_.load();
                 }
                 for (int i = 0; i < 80 && !sounding_ && gen == start_gen_.load(); ++i) usleep(100000);   // up to 8 s
+                if (inapp_) usleep(400000);
                 if (gen != start_gen_.load()) return;          // stopped or another track meanwhile
+                double len = inapp_ ? inapp::length(t.path) : 0;   // without starting another program
+                if (len > 0) { std::lock_guard<std::mutex> l(m_); if (url_ == t.path) dur_ = len; }
                 fetch_art(t);
-                const std::string d = on_path("ffprobe")
-                    ? capture({"ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", t.path}) : "";
+                if (len <= 0 && on_path("ffprobe"))
+                    len = std::atof(capture({"ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", t.path}).c_str());
                 std::lock_guard<std::mutex> l(m_);
-                if (url_ == t.path && std::atof(d.c_str()) > 0) dur_ = std::atof(d.c_str());
+                if (url_ == t.path && len > 0) dur_ = len;
             });
             return;
         }
@@ -568,6 +579,7 @@ public:
 
     void toggle_pause() override {
         std::lock_guard<std::mutex> l(m_);
+        if (inapp_) { paused_ = !paused_; inapp::pause(paused_); return; }
         if (pid_ <= 0) return;
         if (paused_) {
             kill(pid_, SIGCONT);
@@ -582,6 +594,13 @@ public:
 
     void seek(int s) override {
         std::lock_guard<std::mutex> l(m_);
+        if (inapp_) {
+            double p = inapp::pos() + s;
+            if (p < 0) p = 0;
+            if (dur_ > 0 && p > dur_ - 1) p = dur_ - 1;
+            inapp::seek(p);
+            return;
+        }
         if (pid_ <= 0 || url_.empty()) return;
         double p = pos_locked() + s;
         if (p < 0) p = 0;
@@ -614,11 +633,17 @@ public:
                 url_.clear();
             }
         }
-        s.playing = pid_ > 0;
+        if (inapp_ && inapp::ended()) {   // the file ran out
+            inapp::stop();
+            inapp_ = false;
+            ended_ = true;
+            url_.clear();
+        }
+        s.playing = pid_ > 0 || inapp_;
         s.video = video_ && pid_ > 0;
         s.paused = paused_;
         s.loading = pid_ > 0 && !sounding_;
-        s.pos = !s.playing ? 0 : s.loading ? load_pos_ : pos_locked();
+        s.pos = !s.playing ? 0 : inapp_ ? inapp::pos() : s.loading ? load_pos_ : pos_locked();
         s.dur = dur_;
         s.volume = vol_;
         s.title = title_;
@@ -633,6 +658,7 @@ private:
     double pos_locked() const { return (paused_ ? paused_at_ : now_s()) - started_; }
 
     void kill_player() {
+        if (inapp_) { inapp::stop(); inapp_ = false; }
         ++start_gen_;                   // the "has the sound started" watcher of this player gives up
         sounding_ = true;
         if (vfd_ >= 0) { reader_stop_ = true; }
@@ -787,6 +813,7 @@ private:
     std::vector<uint32_t> frame_ = std::vector<uint32_t>(static_cast<size_t>(kVW) * kVH, 0xFF000000u);
     bool frame_new_{false};
     double dur_{0}, started_{0}, paused_at_{0};
+    bool inapp_{false};                     // the app's own decoder is playing (no outside player)
     double load_pos_{0};                    // where the track will start from, shown while it loads
     std::atomic<bool> sounding_{true};      // the player's stream has reached the sound server
     std::atomic<int> start_gen_{0};

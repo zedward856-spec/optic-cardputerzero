@@ -1,5 +1,4 @@
 #define MINIAUDIO_IMPLEMENTATION
-#define MA_NO_DECODING
 #define MA_NO_ENCODING
 #define MA_NO_RESOURCE_MANAGER
 #define MA_NO_NODE_GRAPH
@@ -20,6 +19,8 @@
 #include "sound.h"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -150,6 +151,13 @@ struct Sound::Impl {
     ma_device device{};
     bool ok{false};
 
+    // the music file being played, if any (see inapp:: below)
+    ma_decoder* dec{nullptr};              // on the heap: a decoder must not be moved once set up
+    bool mus_open{false};                  // guarded by mu
+    std::atomic<bool> mus_paused{false}, mus_ended{false};
+    std::atomic<uint64_t> mus_frames{0};   // output frames played from it
+    std::vector<float> mus_buf;
+
     static void callback(ma_device* dev, void* out, const void*, ma_uint32 frames) {
         auto* self = static_cast<Impl*>(dev->pUserData);
         auto* o = static_cast<float*>(out);
@@ -165,6 +173,17 @@ struct Sound::Impl {
             }
             v = std::tanh(v * g);  // soft limit, never harsh clipping
             for (ma_uint32 c = 0; c < ch; ++c) o[i * ch + c] = v;
+        }
+        if (self->mus_open && ch == 2 && !self->mus_paused.load() && !self->mus_ended.load()) {
+            if (self->mus_buf.size() < static_cast<size_t>(frames) * 2) self->mus_buf.resize(static_cast<size_t>(frames) * 2);
+            ma_uint64 got = 0;
+            ma_decoder_read_pcm_frames(self->dec, self->mus_buf.data(), frames, &got);
+            for (ma_uint64 i = 0; i < got * 2; ++i) {
+                const float x = o[i] + self->mus_buf[i];
+                o[i] = x > 1.0f ? 1.0f : x < -1.0f ? -1.0f : x;
+            }
+            self->mus_frames += got;
+            if (got < frames) self->mus_ended = true;
         }
     }
 
@@ -185,11 +204,18 @@ struct Sound::Impl {
     }
 
     ~Impl() {
+        if (g_impl == this) g_impl = nullptr;
         if (ok) ma_device_uninit(&device);
+        if (mus_open && dec) { ma_decoder_uninit(dec); delete dec; }
     }
-};
 
-Sound::Sound() : impl_(std::make_unique<Impl>()) {}
+    static Impl* g_impl;
+};
+Sound::Impl* Sound::Impl::g_impl = nullptr;
+
+Sound::Sound() : impl_(std::make_unique<Impl>()) { Impl::g_impl = impl_.get(); }
+
+
 Sound::~Sound() = default;
 
 bool Sound::available() const { return impl_->ok; }
@@ -225,5 +251,87 @@ void Sound::play(Sfx s) {
     }
     *slot = Impl::Voice{b, 0, s};
 }
+
+struct SoundAccess {
+    static Sound::Impl* impl() { return Sound::Impl::g_impl; }
+};
+
+namespace inapp {
+namespace {
+bool decodable(const std::string& path) {
+    const size_t dot = path.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string e = path.substr(dot + 1);
+    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return e == "mp3" || e == "flac" || e == "wav";
+}
+}  // namespace
+
+bool open(const std::string& path) {
+    auto* im = SoundAccess::impl();
+    if (!im || !im->ok || !decodable(path)) return false;
+    stop();
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, kRate);
+    auto* d = new ma_decoder;
+    if (ma_decoder_init_file(path.c_str(), &cfg, d) != MA_SUCCESS) { delete d; return false; }
+    std::lock_guard<std::mutex> lock(im->mu);
+    im->dec = d;
+    im->mus_frames = 0;
+    im->mus_paused = false;
+    im->mus_ended = false;
+    im->mus_open = true;
+    return true;
+}
+
+void stop() {
+    auto* im = SoundAccess::impl();
+    if (!im) return;
+    std::lock_guard<std::mutex> lock(im->mu);
+    if (im->mus_open) {
+        ma_decoder_uninit(im->dec);
+        delete im->dec;
+        im->dec = nullptr;
+        im->mus_open = false;
+    }
+    im->mus_ended = false;
+}
+
+void pause(bool paused) {
+    if (auto* im = SoundAccess::impl()) im->mus_paused = paused;
+}
+
+void seek(double seconds) {
+    auto* im = SoundAccess::impl();
+    if (!im) return;
+    std::lock_guard<std::mutex> lock(im->mu);
+    if (!im->mus_open) return;
+    const ma_uint64 f = static_cast<ma_uint64>((seconds < 0 ? 0 : seconds) * kRate);
+    if (ma_decoder_seek_to_pcm_frame(im->dec, f) == MA_SUCCESS) {
+        im->mus_frames = f;
+        im->mus_ended = false;
+    }
+}
+
+double length(const std::string& path) {
+    if (!decodable(path)) return 0;
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, kRate);
+    ma_decoder d;
+    if (ma_decoder_init_file(path.c_str(), &cfg, &d) != MA_SUCCESS) return 0;
+    ma_uint64 n = 0;
+    ma_decoder_get_length_in_pcm_frames(&d, &n);
+    ma_decoder_uninit(&d);
+    return static_cast<double>(n) / kRate;
+}
+
+double pos() {
+    auto* im = SoundAccess::impl();
+    return im ? static_cast<double>(im->mus_frames.load()) / kRate : 0;
+}
+
+bool ended() {
+    auto* im = SoundAccess::impl();
+    return im && im->mus_ended.load();
+}
+}  // namespace inapp
 
 }  // namespace velvet
