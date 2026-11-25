@@ -1,3 +1,4 @@
+#include <vector>
 #include <cctype>
 #include "device.h"
 #include "json_lite.h"
@@ -544,16 +545,28 @@ public:
     // Volume through PipeWire, as the stock launcher does now (cp0_audio_mixer_control.cpp). The
     // old "Headphone Playback Volume" (0..63) belonged to the TPA6130A2 amp on the V0.3 board only;
     // production V0.5 boards have the ES8389 codec, whose DAC attenuator PipeWire drives.
-    int volume() override {
-        auto r = run({"pactl", "get-sink-volume", "@DEFAULT_SINK@"});   // "Volume: front-left: 14156 /  22% / ..."
-        auto pos = r.out.find('%');
-        if (r.code == 0 && pos != std::string::npos) {
+    // The left and right levels of the default output, in percent (empty if pactl can't say).
+    static std::vector<int> channel_volumes() {
+        std::vector<int> v;
+        auto r = run({"pactl", "get-sink-volume", "@DEFAULT_SINK@"});   // "Volume: front-left: 14156 /  22% / -40 dB,   front-right: ..."
+        if (r.code != 0) return v;
+        const size_t eol = r.out.find('\n');
+        const std::string line = r.out.substr(0, eol);
+        for (size_t pos = line.find('%'); pos != std::string::npos; pos = line.find('%', pos + 1)) {
             size_t st = pos;
-            while (st > 0 && std::isdigit((unsigned char)r.out[st - 1])) st--;
-            return std::atoi(r.out.c_str() + st);
+            while (st > 0 && std::isdigit((unsigned char)line[st - 1])) st--;
+            if (st < pos) v.push_back(std::atoi(line.c_str() + st));
         }
-        r = run({"wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"});        // "Volume: 0.22"
-        pos = r.out.find("Volume:");
+        return v;
+    }
+
+    // The volume is the louder side: with a balance set (one ear turned down), that is the
+    // number the user thinks of as "the volume".
+    int volume() override {
+        const std::vector<int> ch = channel_volumes();
+        if (!ch.empty()) return *std::max_element(ch.begin(), ch.end());
+        auto r = run({"wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"});        // "Volume: 0.22"
+        const size_t pos = r.out.find("Volume:");
         if (r.code != 0 || pos == std::string::npos) return -1;
         return (int)(std::atof(r.out.c_str() + pos + 7) * 100 + 0.5);
     }
@@ -561,12 +574,18 @@ public:
     // One volume for the whole device: the sound server's (PipeWire's default sink), the same value
     // M5's launcher shows and changes. The launcher also keeps it in ~/.config/cardputerzero/config.json
     // ("volume") and puts that back when it starts, so a change made here is written there too:
-    // otherwise the next boot would undo it.
+    // otherwise the next boot would undo it. A left/right balance set on the output is kept:
+    // both sides move together, in proportion.
     bool set_volume(int percent) override {
         const int v = clamp_pct(percent);
-        const std::string pc = std::to_string(v) + "%";
-        bool ok = run({"pactl", "set-sink-volume", "@DEFAULT_SINK@", pc}).code == 0;
-        if (!ok) ok = run({"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", pc}).code == 0;
+        const std::vector<int> ch = channel_volumes();
+        const int top = ch.empty() ? 0 : *std::max_element(ch.begin(), ch.end());
+        std::vector<std::string> cmd = {"pactl", "set-sink-volume", "@DEFAULT_SINK@"};
+        const bool balanced = ch.size() >= 2 && top > 0 && *std::min_element(ch.begin(), ch.end()) != top;
+        if (balanced) for (int c : ch) cmd.push_back(std::to_string((v * c + top / 2) / top) + "%");
+        else cmd.push_back(std::to_string(v) + "%");
+        bool ok = run(cmd).code == 0;
+        if (!ok) ok = run({"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", std::to_string(v) + "%"}).code == 0;
         if (ok) save_launcher_volume(v);
         return ok;
     }
