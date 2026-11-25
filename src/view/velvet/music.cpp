@@ -24,6 +24,7 @@
 #include <mutex>
 #include <sys/wait.h>
 #include <thread>
+#include <strings.h>
 #include <unistd.h>
 #endif
 
@@ -290,6 +291,39 @@ public:
     }
 
     // the cover, in the background: a file's own picture (ffmpeg), else YouTube's thumbnail
+    // The cover picture stored in an MP3 (its ID3v2 "APIC" frame), read straight from the file:
+    // no outside program, so it is there at once. Empty when there is none or it isn't a JPEG.
+    static std::string id3_cover(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return {};
+        std::string out;
+        unsigned char h[10];
+        if (std::fread(h, 1, 10, f) == 10 && h[0] == 'I' && h[1] == 'D' && h[2] == '3' && (h[3] == 3 || h[3] == 4)) {
+            const size_t total = (static_cast<size_t>(h[6] & 0x7f) << 21) | ((h[7] & 0x7f) << 14) | ((h[8] & 0x7f) << 7) | (h[9] & 0x7f);
+            size_t at = 0;
+            while (at + 10 <= total && total < (32u << 20)) {
+                unsigned char fh[10];
+                if (std::fread(fh, 1, 10, f) != 10 || fh[0] == 0) break;
+                const size_t n = h[3] == 4
+                    ? (static_cast<size_t>(fh[4] & 0x7f) << 21) | ((fh[5] & 0x7f) << 14) | ((fh[6] & 0x7f) << 7) | (fh[7] & 0x7f)
+                    : (static_cast<size_t>(fh[4]) << 24) | (fh[5] << 16) | (fh[6] << 8) | fh[7];
+                if (n == 0 || at + 10 + n > total) break;
+                if (std::memcmp(fh, "APIC", 4) == 0 && n < (8u << 20)) {
+                    std::string b(n, '\0');
+                    if (std::fread(&b[0], 1, n, f) == n) {
+                        const size_t j = b.find("\xFF\xD8\xFF");      // the JPEG itself, after the frame's text fields
+                        if (j != std::string::npos && j < 300) out = b.substr(j);
+                    }
+                    break;
+                }
+                if (std::fseek(f, static_cast<long>(n), SEEK_CUR) != 0) break;
+                at += 10 + n;
+            }
+        }
+        std::fclose(f);
+        return out;
+    }
+
     void clear_art() {
         auto st = art_;
         std::lock_guard<std::mutex> l(st->m);
@@ -305,7 +339,9 @@ public:
         std::thread([st, gen, t] {
             std::string b;
             if (t.local()) {
-                if (on_path("ffmpeg"))
+                b = id3_cover(t.path);
+                const bool mp3 = t.path.size() > 4 && strcasecmp(t.path.c_str() + t.path.size() - 4, ".mp3") == 0;
+                if (b.empty() && !mp3 && on_path("ffmpeg"))   // an MP3 without a cover has none: don't start ffmpeg to learn that
                     b = capture({"ffmpeg", "-v", "quiet", "-i", t.path, "-an", "-frames:v", "1", "-c:v", "mjpeg", "-f", "image2pipe", "-"});
             } else if (!t.id.empty() && on_path("curl")) {
                 b = capture({"curl", "-s", "--max-time", "8", "https://i.ytimg.com/vi/" + t.id + "/mqdefault.jpg"});
@@ -510,11 +546,10 @@ public:
                     gen = start_gen_.load();
                 }
                 for (int i = 0; i < 80 && !sounding_ && gen == start_gen_.load(); ++i) usleep(100000);   // up to 8 s
-                if (inapp_) usleep(400000);
                 if (gen != start_gen_.load()) return;          // stopped or another track meanwhile
+                fetch_art(t);
                 double len = inapp_ ? inapp::length(t.path) : 0;   // without starting another program
                 if (len > 0) { std::lock_guard<std::mutex> l(m_); if (url_ == t.path) dur_ = len; }
-                fetch_art(t);
                 if (len <= 0 && on_path("ffprobe"))
                     len = std::atof(capture({"ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", t.path}).c_str());
                 std::lock_guard<std::mutex> l(m_);
