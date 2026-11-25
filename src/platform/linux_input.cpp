@@ -348,9 +348,9 @@ uint32_t map_evdev_key(uint16_t code, int value) {
     if (code > KEY_MAX) return 0;
     if (value == 1) {
         switch (code) {
-            case KEY_COMPOSE: mod_tap(1); break;
+            case KEY_COMPOSE: case 0x17f: mod_tap(1); break;   // 0x17f: the CardputerZero's SYM key (its driver sends KEY_CD)
             case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: case KEY_CAPSLOCK: mod_tap(2); break;
-            case KEY_FN: mod_tap(3); break;
+            case KEY_FN: case 0x185: mod_tap(3); break;        // 0x185: its fn key (KEY_DVD)
             case KEY_LEFTCTRL: case KEY_RIGHTCTRL: mod_tap(4); break;
             case KEY_LEFTALT: case KEY_RIGHTALT: mod_tap(5); break;
             default: break;

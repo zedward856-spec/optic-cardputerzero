@@ -223,6 +223,7 @@ public:
         imu_ = find_iio("bmi270");
         if (imu_.empty()) imu_ = find_iio("bmi2");
         mag_ = find_iio("bmm150");
+        load_cal();
     }
     bool found() const { return !imu_.empty(); }
 
@@ -236,40 +237,94 @@ public:
             if (!read_num(imu_ + "/in_accel_" + ax[i] + "_raw", acc[i])) return m;
             if (!read_num(imu_ + "/in_anglvel_" + ax[i] + "_raw", gyr[i])) gyr[i] = 0;
         }
-        // NOTE: axis directions follow the chip's mounting; adjust here once tested on hardware.
+        // How the chips sit in the CardputerZero (measured on a production unit, flat / on its
+        // bottom edge / on its left edge): the BMI270's -x points up the screen, its +y to the right.
         m.valid = true;
-        m.ax = static_cast<float>(acc[0] * s_acc);
-        m.ay = static_cast<float>(acc[1] * s_acc);
+        m.ax = static_cast<float>(acc[1] * s_acc);
+        m.ay = static_cast<float>(-acc[0] * s_acc);
         m.az = static_cast<float>(acc[2] * s_acc);
-        m.gx = static_cast<float>(gyr[0] * s_gyr * kRadToDeg);
-        m.gy = static_cast<float>(gyr[1] * s_gyr * kRadToDeg);
+        m.gx = static_cast<float>(gyr[1] * s_gyr * kRadToDeg);
+        m.gy = static_cast<float>(-gyr[0] * s_gyr * kRadToDeg);
         m.gz = static_cast<float>(gyr[2] * s_gyr * kRadToDeg);
         m.source = "BMI270";
-        double mag[3], s_mag = 1;
+        double mag[3];
         if (!mag_.empty()) {
-            read_num(mag_ + "/in_magn_scale", s_mag);
             bool ok = true;
             for (int i = 0; i < 3; ++i) ok = ok && read_num(mag_ + "/in_magn_" + ax[i] + "_raw", mag[i]);
             if (ok) {
-                // tilt-compensated heading (uncalibrated: hard-iron offsets not removed yet)
-                const double roll = std::atan2(m.ay, m.az);
-                const double pitch = std::atan2(-m.ax, std::sqrt(m.ay * m.ay + m.az * m.az));
-                const double mx = mag[0] * s_mag, my = mag[1] * s_mag, mz = mag[2] * s_mag;
-                const double xh = mx * std::cos(pitch) + mz * std::sin(pitch);
-                const double yh = mx * std::sin(roll) * std::sin(pitch) + my * std::cos(roll) -
-                                  mz * std::sin(roll) * std::cos(pitch);
-                double h = std::atan2(-yh, xh) * kRadToDeg;
-                if (h < 0) h += 360;
-                m.has_heading = true;
-                m.heading = static_cast<float>(h);
-                m.source = "BMI270+BMM150";
+                // The compass tunes itself: the middle of the largest and smallest reading seen on
+                // each axis is the chip's own offset (hard iron). Turning the device over in every
+                // direction widens that range; it is kept between runs.
+                bool grew = false;
+                for (int i = 0; i < 3; ++i) {
+                    if (std::fabs(mag[i]) > 6000) continue;          // a glitch, not a field
+                    if (mag[i] < lo_[i]) { lo_[i] = mag[i]; grew = true; }
+                    if (mag[i] > hi_[i]) { hi_[i] = mag[i]; grew = true; }
+                }
+                if (grew) dirty_ = true;
+                if (dirty_ && ++since_save_ > 100) { save_cal(); }
+                double c[3];
+                for (int i = 0; i < 3; ++i) c[i] = mag[i] - (lo_[i] + hi_[i]) / 2;
+                // the BMM150 in the device's frame (x right, y up the screen, z out of it)
+                const double mt[3] = {c[1], c[0], -c[2]};
+                const double g = std::sqrt(m.ax * m.ax + m.ay * m.ay + m.az * m.az);
+                const double mn = std::sqrt(mt[0] * mt[0] + mt[1] * mt[1] + mt[2] * mt[2]);
+                if (g > 1 && mn > 1) {
+                    const double up[3] = {m.ax / g, m.ay / g, m.az / g};
+                    const double mu = mt[0] * up[0] + mt[1] * up[1] + mt[2] * up[2];
+                    double n[3] = {mt[0] - mu * up[0], mt[1] - mu * up[1], mt[2] - mu * up[2]};   // north, level
+                    const double nn = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    if (nn > 1e-6) {
+                        for (double& v : n) v /= nn;
+                        const double e[3] = {n[1] * up[2] - n[2] * up[1], n[2] * up[0] - n[0] * up[2], n[0] * up[1] - n[1] * up[0]};
+                        // which way the device faces: its top edge, or its back when held upright
+                        const bool upright = std::fabs(up[1]) > 0.8;
+                        const double f[3] = {0, upright ? 0.0 : 1.0, upright ? -1.0 : 0.0};
+                        const double fu = f[0] * up[0] + f[1] * up[1] + f[2] * up[2];
+                        const double fh[3] = {f[0] - fu * up[0], f[1] - fu * up[1], f[2] - fu * up[2]};
+                        double h = std::atan2(fh[0] * e[0] + fh[1] * e[1] + fh[2] * e[2],
+                                              fh[0] * n[0] + fh[1] * n[1] + fh[2] * n[2]) * kRadToDeg;
+                        if (h < 0) h += 360;
+                        m.has_heading = true;
+                        m.heading = static_cast<float>(h);
+                        m.source = "BMI270+BMM150";
+                    }
+                }
             }
         }
         return m;
     }
 
 private:
+    static std::string cal_file() {
+        const char* home = std::getenv("HOME");
+        return std::string(home ? home : "/tmp") + "/.config/optic-suite/mag_cal";
+    }
+    void load_cal() {
+        if (FILE* f = std::fopen(cal_file().c_str(), "r")) {
+            double v[6];
+            if (std::fscanf(f, "%lf %lf %lf %lf %lf %lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6 &&
+                v[0] < v[3] && v[1] < v[4] && v[2] < v[5]) {
+                for (int i = 0; i < 3; ++i) { lo_[i] = v[i]; hi_[i] = v[i + 3]; }
+            }
+            std::fclose(f);
+        }
+    }
+    void save_cal() {
+        since_save_ = 0;
+        dirty_ = false;
+        const std::string p = cal_file();
+        mkdir(p.substr(0, p.rfind('/')).c_str(), 0755);
+        if (FILE* f = std::fopen(p.c_str(), "w")) {
+            std::fprintf(f, "%.0f %.0f %.0f %.0f %.0f %.0f\n", lo_[0], lo_[1], lo_[2], hi_[0], hi_[1], hi_[2]);
+            std::fclose(f);
+        }
+    }
     std::string imu_, mag_;
+    // Starting range: a fit to one unit's readings, narrowed so real extremes replace it.
+    double lo_[3] = {464 - 450, 967 - 450, 874 - 450}, hi_[3] = {464 + 450, 967 + 450, 874 + 450};
+    bool dirty_{false};
+    int since_save_{0};
 };
 
 class SimSensors final : public Sensors {

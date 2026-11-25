@@ -289,6 +289,14 @@ public:
     }
 
     // the cover, in the background: a file's own picture (ffmpeg), else YouTube's thumbnail
+    void clear_art() {
+        auto st = art_;
+        std::lock_guard<std::mutex> l(st->m);
+        ++st->gen;
+        st->bytes.clear();
+        st->fresh = true;
+    }
+
     void fetch_art(const Track& t) {
         auto st = art_;
         int gen;
@@ -315,7 +323,7 @@ public:
     }
 
     bool available(std::string& why) override {
-        if (!on_path("mpv") && !on_path("ffplay")) { why = "INSTALL mpv  (sudo apt install mpv)"; return false; }
+        if (!on_path("mpv") && !on_path("ffplay") && !on_path("ffmpeg")) { why = "INSTALL mpv  (sudo apt install mpv)"; return false; }
         return true;
     }
     bool online() override { return ytdlp_ready() || ytdlp_can_install(); }
@@ -470,7 +478,8 @@ public:
         if (busy_) return;
         stop();
         busy_ = true;
-        fetch_art(t);
+        if (!t.local()) fetch_art(t);   // a file's own picture is read after its sound has started
+        else clear_art();
         {
             std::lock_guard<std::mutex> l(m_);
             title_ = t.title;
@@ -480,15 +489,25 @@ public:
         }
         if (worker_.joinable()) worker_.join();
         if (t.local()) {   // a file of your own: its length from ffprobe, then straight to the player
+            // The player first and alone: on a CardputerZero each of these programs takes seconds
+            // to load, and three at once (player, picture, length) made a song take ~10 s to start.
             worker_ = std::thread([this, t] {
+                int gen;
+                {
+                    std::lock_guard<std::mutex> l(m_);
+                    url_ = t.path;
+                    aurl_.clear();
+                    start_at(0);
+                    busy_ = false;
+                    gen = start_gen_.load();
+                }
+                for (int i = 0; i < 80 && !sounding_ && gen == start_gen_.load(); ++i) usleep(100000);   // up to 8 s
+                if (gen != start_gen_.load()) return;          // stopped or another track meanwhile
+                fetch_art(t);
                 const std::string d = on_path("ffprobe")
                     ? capture({"ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", t.path}) : "";
                 std::lock_guard<std::mutex> l(m_);
-                dur_ = std::atof(d.c_str());
-                url_ = t.path;
-                aurl_.clear();
-                start_at(0);
-                busy_ = false;
+                if (url_ == t.path && std::atof(d.c_str()) > 0) dur_ = std::atof(d.c_str());
             });
             return;
         }
@@ -662,11 +681,24 @@ private:
         else if (on_path("mpv"))
             argv = {"mpv", "--no-video", "--no-terminal", "--really-quiet", std::string("--start=") + start,
                     std::string("--volume=") + vol, url_};
-        else if (url_.compare(0, 4, "http") == 0)   // a stream: don't read ahead to analyse it (5 s -> 3 s to the first sound)
-            argv = {"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-probesize", "32768", "-analyzeduration", "0",
-                    "-ss", start, "-volume", vol, url_};
-        else
-            argv = {"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", start, "-volume", vol, url_};
+        else {
+            // ffmpeg straight to the sound server starts sooner than ffplay (no SDL to bring up);
+            // ffplay stays as the fallback. A stream isn't read ahead to analyse it.
+            const bool http = url_.compare(0, 4, "http") == 0;
+            const char* rt = std::getenv("XDG_RUNTIME_DIR");
+            const bool pulse = std::getenv("PULSE_SERVER") || (rt && access((std::string(rt) + "/pulse/native").c_str(), F_OK) == 0);
+            if (pulse && on_path("ffmpeg")) {
+                argv = {"ffmpeg", "-nostdin", "-v", "error"};
+                if (http) argv.insert(argv.end(), {"-probesize", "32768", "-analyzeduration", "0"});
+                argv.insert(argv.end(), {"-ss", start, "-i", url_, "-vn"});
+                if (vol_ != 100) { char af[32]; std::snprintf(af, sizeof af, "volume=%.2f", vol_ / 100.0); argv.insert(argv.end(), {"-af", af}); }
+                argv.insert(argv.end(), {"-buffer_duration", "300", "-f", "pulse", "default"});
+            } else {
+                argv = {"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"};
+                if (http) argv.insert(argv.end(), {"-probesize", "32768", "-analyzeduration", "0"});
+                argv.insert(argv.end(), {"-ss", start, "-volume", vol, url_});
+            }
+        }
         std::vector<char*> a;
         for (auto& s : argv) a.push_back(const_cast<char*>(s.c_str()));
         a.push_back(nullptr);
