@@ -241,7 +241,7 @@ lv_obj_t* hints_r(lv_obj_t* parent, int32_t right, int32_t y, lv_font_t* font,
 
 // ---- line icons (14x14), drawn in the object's text colour ----
 enum Icon { IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcPwn, IcStats, IcWifi, IcSystem,
-            IcNet, IcEth, IcTor, IcTailscale, IcSpeed, IcTools, IcOptic, IcHdmi };
+            IcNet, IcEth, IcTor, IcTailscale, IcSpeed, IcTools, IcOptic, IcHdmi, IcBt };
 
 // The Optic eye (the logo's two lids and iris halves, logo units 7.5..112.5 x 30..90), [w] px
 // wide with its top-left at (x, y) from (ox, oy). Its height is w * 4 / 7.
@@ -361,6 +361,13 @@ void draw_icon(lv_layer_t* layer, int ic, lv_area_t a, lv_color_t col) {
                 rect(0, y, 14, 1);
                 rect(k - 1, y - 1, 3, 3);
             }
+            break;
+        case IcBt:  // the Bluetooth rune
+            seg(7, 0.5f, 7, 13.5f, 0.6f);
+            seg(7, 0.5f, 11, 4, 0.55f);
+            seg(11, 4, 3, 10, 0.55f);
+            seg(7, 13.5f, 11, 10, 0.55f);
+            seg(11, 10, 3, 4, 0.55f);
             break;
         case IcHdmi:  // a screen on its stand
             frame(0, 1, 14, 9);
@@ -512,11 +519,11 @@ bool is_row_up(uint32_t k) { return k == LV_KEY_UP || k == ';' || k == 'f'; }
 bool is_row_down(uint32_t k) { return k == LV_KEY_DOWN || k == '.' || k == 'x'; }
 
 // ---- content ----
-const char* kHubItems[] = {"Terminal", "Browser", "Music", "Camera", "Gallery", "Sensors", "Network", "HDMI", "System"};
-const Icon kHubIcons[] = {IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcNet, IcHdmi, IcSystem};
-const Page kHubPages[] = {Page::Terminal, Page::Browser, Page::Music, Page::Camera,
-                          Page::Gallery,  Page::Sensors, Page::Net,   Page::Hdmi, Page::System};
-constexpr int kHubCount = 9;
+const char* kHubItems[] = {"Terminal", "Browser", "Music", "Camera", "Gallery", "Sensors", "Network", "Bluetooth", "HDMI", "System"};
+const Icon kHubIcons[] = {IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcNet, IcBt, IcHdmi, IcSystem};
+const Page kHubPages[] = {Page::Terminal, Page::Browser, Page::Music, Page::Camera, Page::Gallery,
+                          Page::Sensors,  Page::Net,     Page::Bluetooth, Page::Hdmi, Page::System};
+constexpr int kHubCount = 10;
 constexpr int kHubVisible = 5;   // menu rows on screen; the list scrolls past that
 constexpr int32_t kHubY0 = 29;   // first menu row
 constexpr int32_t kHubDy = 24;   // menu row spacing
@@ -733,6 +740,13 @@ void VelvetUI::update_hub_status() {
                 if (!hdmi_.supported) std::snprintf(buf, sizeof buf, "Not here");
                 else if (hdmi_.running && !hdmi_.hz.empty()) std::snprintf(buf, sizeof buf, "On  %s Hz", hdmi_.hz.c_str());
                 else std::snprintf(buf, sizeof buf, "%s", hdmi_.running ? "On" : hdmi_.connected ? "Off" : "No screen");
+            } else if (kHubPages[i] == Page::Bluetooth) {
+                if (!bt_) bt_ = make_btaudio();
+                if (bt_hub_age_-- <= 0) { bt_->refresh(); bt_hub_age_ = 15; }
+                const BtAudioState b = bt_->state();
+                std::string who;
+                for (const auto& d : b.devices) if (d.connected) { who = d.name; break; }
+                std::snprintf(buf, sizeof buf, "%.16s", who.c_str());
             } else if (kHubPages[i] == Page::Net) {
                 std::snprintf(buf, sizeof buf, "%.16s", !net_.radio_on ? "Off" : net_.connected ? net_.ssid.c_str() : "Not connected");
             } else if (kHubPages[i] == Page::System && pw.valid) {
@@ -1024,6 +1038,11 @@ void VelvetUI::clear_page_timers() {
         lv_timer_delete(sys_timer_);
         sys_timer_ = nullptr;
     }
+    if (bt_timer_) {
+        lv_timer_delete(bt_timer_);
+        bt_timer_ = nullptr;
+    }
+    bt_box_ = bt_note_ = nullptr;
     if (hdmi_timer_) {
         lv_timer_delete(hdmi_timer_);
         hdmi_timer_ = nullptr;
@@ -1118,6 +1137,7 @@ void VelvetUI::build_page(Page page) {
         case Page::Net: build_net(page_); break;
         case Page::System: build_system(page_); break;
         case Page::Hdmi: build_hdmi(page_); break;
+        case Page::Bluetooth: build_bluetooth(page_); break;
         case Page::Terminal: build_terminal(page_); break;
         case Page::Camera: build_camera(page_); break;
         case Page::Sensors: build_sensors(page_); break;
@@ -1250,6 +1270,131 @@ void VelvetUI::build_system(lv_obj_t* p) {
 // The Optic desktop on the HDMI screen, from this app: what is plugged in, the mode and refresh
 // rate it runs at, and one switch that starts or stops it. The desktop is its own program
 // (optic-de-hdmi); this screen and the app keep running beside it.
+// ---------------------------------------------------------------- Bluetooth
+// One list: where sound goes, a test sound, each thing that is playing (it can be sent
+// somewhere else on its own), the devices, and a scan.
+namespace {
+enum { kBtOutput, kBtTest, kBtStream, kBtDevice, kBtScan, kBtNone };
+constexpr int kBtVisible = 5;
+}
+
+std::vector<VelvetUI::BtRow> VelvetUI::bt_rows() {
+    std::vector<BtRow> r;
+    const BtAudioState& s = bt_state_;
+    if (!s.available) return r;
+    auto out_name = [&](int i) { return i >= 0 && i < static_cast<int>(s.outputs.size()) ? s.outputs[i].label : std::string("--"); };
+    const bool choice = s.outputs.size() > 1;
+    r.push_back({kBtOutput, 0, "Sound goes to", choice ? "< " + out_name(s.default_output) + " >" : out_name(s.default_output)});
+    r.push_back({kBtTest, 0, "Test sound", "OK"});
+    if (choice) for (const auto& st : s.streams) r.push_back({kBtStream, st.id, "  " + st.app, "< " + out_name(st.output) + " >"});
+    for (size_t i = 0; i < s.devices.size(); ++i) {
+        const auto& d = s.devices[i];
+        r.push_back({kBtDevice, static_cast<int>(i), d.name, d.connected ? "Connected" : d.paired ? "Paired" : "New"});
+    }
+    r.push_back({kBtScan, 0, "Look for devices", s.scanning ? "Looking..." : "OK"});
+    return r;
+}
+
+void VelvetUI::build_bluetooth(lv_obj_t* p) {
+    build_page_chrome(p, "Bluetooth");
+    if (!bt_) bt_ = make_btaudio();
+    bt_box_ = plain(p);
+    lv_obj_set_pos(bt_box_, 0, 28);
+    lv_obj_set_size(bt_box_, 320, kBtVisible * 20 + 2);
+    bt_note_ = label(p, "", f_.mono10, kGrey, 8, 134);
+    lv_obj_set_width(bt_note_, 304);
+    lv_label_set_long_mode(bt_note_, LV_LABEL_LONG_DOT);
+    hints_r(p, 316, 151, f_.mono10, {{"OK", "Choose"}, {"DEL", "Forget"}});
+    bt_sel_ = bt_top_ = 0;
+    bt_->refresh();
+    bt_state_ = bt_->state();
+    bt_render();
+    bt_timer_ = lv_timer_create(bt_tick_cb, 700, this);
+}
+
+void VelvetUI::bt_render() {
+    if (!bt_box_) return;
+    lv_obj_clean(bt_box_);
+    const std::vector<BtRow> rows = bt_rows();
+    const BtAudioState& s = bt_state_;
+    if (rows.empty()) {
+        label(bt_box_, s.busy ? "Looking for Bluetooth..." : "No Bluetooth here", f_.mono12, kWhite, 12, 30);
+        lv_label_set_text(bt_note_, "");
+        return;
+    }
+    const int n = static_cast<int>(rows.size());
+    bt_sel_ = std::max(0, std::min(n - 1, bt_sel_));
+    if (bt_sel_ < bt_top_) bt_top_ = bt_sel_;
+    if (bt_sel_ >= bt_top_ + kBtVisible) bt_top_ = bt_sel_ - kBtVisible + 1;
+    bt_top_ = std::max(0, std::min(std::max(0, n - kBtVisible), bt_top_));
+    for (int i = 0; i < kBtVisible && bt_top_ + i < n; ++i) {
+        const BtRow& r = rows[bt_top_ + i];
+        const bool sel = bt_top_ + i == bt_sel_;
+        const int32_t y = 2 + i * 20;
+        if (sel) pill(bt_box_, 4, y, 312, 18, kWhite);
+        const uint32_t fg = sel ? kInk : kWhite, dim = sel ? kInk : kGrey;
+        lv_obj_t* r_l = label(bt_box_, font_safe_text(f_.mono10, r.right).c_str(), f_.mono10, dim, 0, y + 3);
+        const int32_t rw = text_width(r_l);
+        lv_obj_set_x(r_l, 316 - 8 - rw);
+        lv_obj_t* l_l = label(bt_box_, font_safe_text(f_.mono10, r.left).c_str(), f_.mono10, fg, 12, y + 3);
+        lv_obj_set_width(l_l, 316 - 8 - rw - 8 - 12);
+        lv_label_set_long_mode(l_l, LV_LABEL_LONG_DOT);
+    }
+    if (n > kBtVisible) {   // a thin scroll mark at the right edge
+        const int32_t track = kBtVisible * 20, th = std::max<int32_t>(8, track * kBtVisible / n);
+        pill(bt_box_, 317, 2 + (track - th) * bt_top_ / std::max(1, n - kBtVisible), 2, th, kGrey);
+    }
+    std::string note = s.note;
+    if (note.empty()) {
+        const BtRow& r = rows[bt_sel_];
+        if (r.kind == kBtOutput) note = s.outputs.size() > 1 ? "< > moves all sound" : "Connect a device first";
+        else if (r.kind == kBtStream) note = "< > moves only this one";
+        else if (r.kind == kBtTest) note = "Plays left, right, both";
+        else if (r.kind == kBtDevice) note = s.devices[r.ref].connected ? "OK disconnects" : s.devices[r.ref].paired ? "OK connects" : "OK pairs and connects";
+        else if (r.kind == kBtScan) note = "Pairing mode first, then OK";
+    }
+    lv_label_set_text(bt_note_, note.c_str());
+}
+
+bool VelvetUI::bt_key(uint32_t key) {
+    const std::vector<BtRow> rows = bt_rows();
+    if (rows.empty()) return true;
+    const int n = static_cast<int>(rows.size());
+    bt_sel_ = std::max(0, std::min(n - 1, bt_sel_));
+    const BtRow& r = rows[bt_sel_];
+    const int outs = static_cast<int>(bt_state_.outputs.size());
+    auto step_out = [&](int from, int d) { return outs > 0 ? ((from < 0 ? 0 : from) + d + outs) % outs : -1; };
+    if (is_row_up(key)) { bt_sel_ = (bt_sel_ + n - 1) % n; sound_->play(Sfx::Move); }
+    else if (is_row_down(key)) { bt_sel_ = (bt_sel_ + 1) % n; sound_->play(Sfx::Move); }
+    else if (r.kind == kBtOutput && outs > 1 && (is_left(key) || is_right(key) || is_enter(key))) {
+        bt_->set_default(step_out(bt_state_.default_output, is_left(key) ? -1 : 1));
+        sound_->play(Sfx::Move);
+    } else if (r.kind == kBtStream && outs > 1 && (is_left(key) || is_right(key) || is_enter(key))) {
+        int cur = -1;
+        for (const auto& st : bt_state_.streams) if (st.id == r.ref) cur = st.output;
+        bt_->move_stream(r.ref, step_out(cur, is_left(key) ? -1 : 1));
+        sound_->play(Sfx::Move);
+    } else if (is_enter(key)) {
+        if (r.kind == kBtTest) bt_->test();
+        else if (r.kind == kBtScan) bt_->scan();
+        else if (r.kind == kBtDevice) bt_->act(bt_state_.devices[r.ref].mac);
+        sound_->play(Sfx::Open);
+    } else if ((key == LV_KEY_DEL || key == LV_KEY_BACKSPACE) && r.kind == kBtDevice && bt_state_.devices[r.ref].paired) {
+        bt_->forget(bt_state_.devices[r.ref].mac);
+    }
+    bt_state_ = bt_->state();
+    bt_render();
+    return true;
+}
+
+void VelvetUI::bt_tick_cb(lv_timer_t* t) {
+    auto* self = static_cast<VelvetUI*>(lv_timer_get_user_data(t));
+    if (!self->bt_ || !self->bt_box_) return;
+    if (++self->bt_beat_ % 3 == 0) self->bt_->refresh();
+    self->bt_state_ = self->bt_->state();
+    self->bt_render();
+}
+
 void VelvetUI::build_hdmi(lv_obj_t* p) {
     build_page_chrome(p, "HDMI");
     if (device_->is_demo()) label(p, "Demo", f_.mono10, kFaint, 80, 7);
@@ -5457,6 +5602,9 @@ bool VelvetUI::handle_key(uint32_t key, bool long_pressed) {
         case Page::Hdmi:
             if (is_enter(key) || is_left(key) || is_right(key)) hdmi_toggle();
             break;
+        case Page::Bluetooth:
+            bt_key(key);
+            break;
         default: break;
     }
     return true;
@@ -6284,6 +6432,16 @@ const ShotStep kScript[] = {
     {kGoto | P(Page::Music), 300, nullptr, nullptr},
     {LV_KEY_ENTER, 1500, "72-music", nullptr},
     {LV_KEY_ESC, 800, "73-hub-end", nullptr},
+    {kGoto | P(Page::Bluetooth), 500, nullptr, nullptr},
+    {LV_KEY_ENTER, 3200, "73a-bluetooth", nullptr},
+    {LV_KEY_DOWN, 500, nullptr, nullptr},
+    {LV_KEY_DOWN, 500, nullptr, nullptr},
+    {LV_KEY_RIGHT, 700, "73b-bluetooth-stream", nullptr},
+    {LV_KEY_DOWN, 300, nullptr, nullptr},
+    {LV_KEY_DOWN, 300, nullptr, nullptr},
+    {LV_KEY_DOWN, 300, nullptr, nullptr},
+    {LV_KEY_DOWN, 900, "73c-bluetooth-device", nullptr},
+    {LV_KEY_ESC, 800, nullptr, nullptr},
     {kGoto | P(Page::Hdmi), 500, "74-hub-hdmi", nullptr},
     {LV_KEY_ENTER, 1500, "75-hdmi-off", nullptr},   // HDMI: a screen is plugged in, the desktop off
     {LV_KEY_ENTER, 500, "76-hdmi-starting", nullptr},

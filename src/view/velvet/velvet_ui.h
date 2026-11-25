@@ -1,6 +1,7 @@
 // CardputerZero UI ("Velvet" in the code): MinUI-style pocket OS for the CardputerZero (320x170).
 #pragma once
 
+#include "btaudio.h"
 #include "device.h"
 #include "lvgl.h"
 #include "browser.h"
@@ -28,7 +29,7 @@ class AssetManager;
 
 namespace velvet {
 
-enum class Page { Hub, Stats, Wifi, System, Terminal, Camera, Sensors, Browser, Gallery, Music, Pwn, Net, Hdmi };
+enum class Page { Hub, Stats, Wifi, System, Terminal, Camera, Sensors, Browser, Gallery, Music, Pwn, Net, Hdmi, Bluetooth };
 
 class VelvetUI {
 public:
@@ -208,6 +209,19 @@ private:
     void system_render();
     void system_adjust(int delta);
     static void system_tick_cb(lv_timer_t* t);
+    // the Bluetooth page: devices, where sound goes, a test sound
+    void build_bluetooth(lv_obj_t* p);
+    void bt_render();
+    bool bt_key(uint32_t key);
+    static void bt_tick_cb(lv_timer_t* t);
+    struct BtRow { int kind; int ref; std::string left, right; };
+    std::vector<BtRow> bt_rows();
+    std::unique_ptr<BtAudio> bt_;
+    BtAudioState bt_state_{};
+    lv_obj_t* bt_box_{};
+    lv_obj_t* bt_note_{};
+    lv_timer_t* bt_timer_{};
+    int bt_sel_{0}, bt_top_{0}, bt_beat_{0}, bt_hub_age_{0};
     void hdmi_render();
     void hdmi_toggle();
     static void hdmi_tick_cb(lv_timer_t* t);
