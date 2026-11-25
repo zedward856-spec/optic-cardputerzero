@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Velvet Boot</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+:root{--bg:#060c26;--panel:#0a1747;--fg:#fff;--soft:#8fa8ff;--red:#ff2e63;--gold:#ffd23f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:"IBM Plex Mono",monospace;padding:28px 16px 60px}
+main{max-width:1000px;margin:0 auto}
+h1{font-family:Anton,Impact,sans-serif;font-size:52px;line-height:.9;margin:0 0 6px;transform:rotate(-3deg);transform-origin:left;text-shadow:4px 4px 0 var(--red)}
+.sub{color:var(--soft);font-size:13px;margin:14px 0 22px;max-width:70ch;line-height:1.6}
+.stage{width:min(960px,100%);aspect-ratio:320/170;background:#000;outline:2px solid #1b2a66}
+.stage canvas{width:100%;height:100%;display:block;image-rendering:pixelated}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.bar button{font:600 13px "IBM Plex Mono",monospace;background:var(--panel);color:var(--soft);border:0;padding:7px 16px;cursor:pointer;clip-path:polygon(7px 0,100% 0,calc(100% - 7px) 100%,0 100%)}
+.bar button[aria-pressed="true"]{background:#fff;color:var(--panel)}
+.bar .sep{width:14px}
+.notes{background:var(--panel);padding:16px 22px;font-size:13px;line-height:1.7;clip-path:polygon(0 0,100% 0,calc(100% - 14px) 100%,0 100%)}
+.notes b{color:var(--gold)}
+.time{font-size:12px;color:var(--soft);margin-left:auto;align-self:center}
+</style>
+</head>
+<body>
+<main>
+<h1>VELVET BOOT</h1>
+<p class="sub">Boot splash designs for Velvet, drawn exactly like the app draws: Terminus pixel text, sharp Anton letters on ransom tiles, hard-edged shapes. Pick a design and a theme; it loops and ends by sweeping into the real home menu. Not in the app yet.</p>
+
+<div class="stage"><canvas id="c" width="320" height="170" aria-label="Boot animation preview"></canvas></div>
+
+<div class="bar" role="group" aria-label="Controls">
+  <button data-v="A" aria-pressed="true">A · PERSONA SLASH</button>
+  <button data-v="B">B · FIRE</button>
+  <span class="sep"></span>
+  <button data-t="0" aria-pressed="true">P3 BLUE</button>
+  <button data-t="1">P5 RED</button>
+  <span class="sep"></span>
+  <button id="replay">↻ REPLAY</button>
+  <button id="slow">SLOW 0.25×</button>
+  <button id="snd" aria-pressed="true">SOUND</button>
+  <span class="time" id="time"></span>
+</div>
+
+<div class="notes">
+  <b>A · Persona slash</b> — black screen → the red and black bands sweep away → VELVET drops in letter by letter on tilted ransom tiles → the star burst spins up behind it → "CARDPUTERZERO · POCKET OS" strip slides in → slanted loading segments fill while the status changes (WAKING UP … READY) → the bands sweep again into the home menu. About 2.9 s.<br>
+  <b>B · Fire</b> — same beats, but pixel flames (2×2 pixel blocks) burn up from the bottom behind the title: red → orange → gold in P5, a blue flame in P3. They flare when READY hits, then die down before the sweep.<br>
+  Sound (click a button first): slide swoosh on the sweeps, a tick per letter, a chime on READY.
+</div>
+</main>
+
+<script>
+const FONT = __FONT__;
+const HUB = "data:image/png;base64,__HUB__";
+const W = 320, H = 170;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+// ---------------------------------------------------------------- palette (same as the app)
+const THEMES = [
+  {navy:'#0a1747', deep:'#071034', blue:'#1b3fd0', row:'#142a86', soft:'#8fa8ff', white:'#ffffff', red:'#ff2e63', ink:'#04060f', gold:'#ffd23f', burst:'#04060f', dots:'#1b3fd0',
+   fire:['#071034','#0a1747','#142a86','#1b3fd0','#2f55f0','#4d7cff','#8fa8ff','#c8d4ff']},
+  {navy:'#101010', deep:'#000000', blue:'#b3001b', row:'#2a2a2a', soft:'#d8d8d8', white:'#ffffff', red:'#ff1f3d', ink:'#000000', gold:'#ffe600', burst:'#ff1f3d', dots:'#b3001b',
+   fire:['#1a0000','#5a0000','#b3001b','#ff1f3d','#ff4a24','#ff6a2b','#ffb000','#ffe600']},
+];
+let theme = 0, variant = 'A', P = THEMES[0];
+
+// ---------------------------------------------------------------- crisp drawing (hard pixels)
+function poly(pts, color){
+  ctx.fillStyle = color;
+  let y0 = Infinity, y1 = -Infinity;
+  for(const p of pts){ y0 = Math.min(y0,p[1]); y1 = Math.max(y1,p[1]); }
+  for(let y = Math.floor(y0); y < Math.ceil(y1); y++){
+    const sy = y + .5, xs = [];
+    for(let i = 0; i < pts.length; i++){
+      const a = pts[i], b = pts[(i+1) % pts.length];
+      if((a[1] <= sy) !== (b[1] <= sy)) xs.push(a[0] + (sy - a[1]) * (b[0] - a[0]) / (b[1] - a[1]));
+    }
+    xs.sort((p,q)=>p-q);
+    for(let i = 0; i + 1 < xs.length; i += 2){
+      const xa = Math.ceil(xs[i] - .5), xb = Math.ceil(xs[i+1] - .5) - 1;
+      if(xb >= xa) ctx.fillRect(xa, y, xb - xa + 1, 1);
+    }
+  }
+}
+const slant = (x,y,w,h,s,c) => poly([[x+s,y],[x+w,y],[x+w-s,y+h],[x,y+h]], c);
+function tilted(cx,cy,w,h,deg){
+  const a = deg*Math.PI/180, c = Math.cos(a), s = Math.sin(a);
+  return [[-w/2,-h/2],[w/2,-h/2],[w/2,h/2],[-w/2,h/2]].map(([x,y]) => [cx + x*c - y*s, cy + x*s + y*c]);
+}
+function star(cx,cy,ro,ri,n,deg){
+  const pts = [];
+  for(let i = 0; i < n*2; i++){
+    const a = (deg + i*180/n) * Math.PI/180 - Math.PI/2, r = i % 2 ? ri : ro;
+    pts.push([cx + Math.cos(a)*r, cy + Math.sin(a)*r]);
+  }
+  return pts;
+}
+function disc(cx,cy,r,c){ const pts=[]; for(let i=0;i<20;i++){ const a=i/20*2*Math.PI; pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]); } poly(pts,c); }
+function halftone(x,y,w,h,c,corner){  // dots grow toward one corner, like the app
+  for(let yy = 0; yy < h; yy += 6){
+    const shift = (yy/6) % 2 ? 3 : 0;
+    for(let xx = shift; xx < w; xx += 6){
+      const fx = corner ? 1 - xx/w : xx/w, fy = corner ? yy/h : 1 - yy/h;
+      const r = 0.3 + 2.6 * fx * fy;
+      if(r >= .6) disc(x+xx, y+yy, r, c);
+    }
+  }
+}
+// Terminus Bold 8x14, straight from the app's font file
+function ter(str, x, y, color){
+  ctx.fillStyle = color;
+  for(const ch of str){
+    const g = FONT[ch];
+    if(g){
+      const [bw,bh,ox,oy,bits] = g, top = y + 12 - (oy + bh);
+      for(let i = 0; i < bits.length; i++) if(bits[i] === '1') ctx.fillRect(x + ox + i % bw, top + (i / bw | 0), 1, 1);
+    }
+    x += 8;
+  }
+}
+// Anton letters thresholded to one solid colour (what the app's crisp() does)
+const glyphCache = new Map();
+function anton(ch, size, color){
+  const key = ch + size + color;
+  if(glyphCache.has(key)) return glyphCache.get(key);
+  const o = document.createElement('canvas'), oc = o.getContext('2d');
+  oc.font = `${size}px Anton`;
+  const w = Math.ceil(oc.measureText(ch).width) + 4;
+  o.width = w; o.height = Math.ceil(size * 1.3);
+  oc.font = `${size}px Anton`; oc.fillStyle = color; oc.textBaseline = 'alphabetic';
+  oc.fillText(ch, 2, size);
+  const d = oc.getImageData(0, 0, o.width, o.height);
+  let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
+  const [r,g,b] = [1,3,5].map(i => parseInt(color.slice(i,i+2),16));
+  for(let i = 0; i < d.data.length; i += 4){
+    const on = d.data[i+3] >= 128, p = i/4;
+    d.data[i]=r; d.data[i+1]=g; d.data[i+2]=b; d.data[i+3] = on ? 255 : 0;
+    if(on){ const x = p % o.width, y = p / o.width | 0; x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
+  }
+  oc.putImageData(d, 0, 0);
+  const res = {img:o, x0, x1, y0, y1, base:size};
+  glyphCache.set(key, res);
+  return res;
+}
+
+// ---------------------------------------------------------------- timing helpers
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const prog = (t,a,b) => clamp((t-a)/(b-a), 0, 1);
+const easeOut = p => 1 - Math.pow(1-p, 3);
+const easeIn = p => p*p*p;
+const back = p => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3*Math.pow(p-1,3) + c1*Math.pow(p-1,2); };
+
+// the app's transition: a red band then an ink band, 600 wide with a 130 px slant
+function bands(t, start, forward){
+  const from = forward ? 340 : -620, cover = -150, to = forward ? -780 : 340;
+  for(const [delay, col] of [[0, P.red], [0.045, P.ink]]){
+    const tt = t - start - delay;
+    let x;
+    if(tt < 0) x = from;
+    else if(tt < 0.15) x = from + (cover - from) * easeIn(tt/0.15);
+    else x = cover + (to - cover) * easeOut(clamp((tt - 0.15 - 0.03) / 0.22, 0, 1));
+    slant(x, -10, 600, 190, 130, col);
+  }
+}
+
+// ---------------------------------------------------------------- fire (B)
+const FW = 160, FH = 85, fire = new Uint8Array(FW*FH);
+const fireCv = document.createElement('canvas'); fireCv.width = FW; fireCv.height = FH;
+const fireCtx = fireCv.getContext('2d'), fireImg = fireCtx.createImageData(FW, FH);
+let fireLast = 0;
+function fireStep(source){
+  for(let x = 0; x < FW; x++) fire[(FH-1)*FW + x] = source;
+  for(let x = 0; x < FW; x++){
+    for(let y = 1; y < FH; y++){
+      const src = y*FW + x, v = fire[src];
+      if(v === 0){ fire[src - FW] = 0; continue; }
+      const r = Math.random()*3 | 0, dst = src - r + 1;
+      fire[Math.max(0, dst - FW)] = Math.max(0, v - (r & 1));
+    }
+  }
+}
+function fireDraw(){
+  const stops = P.fire.map(c => [1,3,5].map(i => parseInt(c.slice(i,i+2),16)));
+  for(let i = 0; i < FW*FH; i++){
+    const v = fire[i], o = i*4;
+    if(v < 3){ fireImg.data[o+3] = 0; continue; }
+    const s = stops[Math.min(stops.length-1, Math.floor((v-3) / 34 * stops.length))];   // hard colour steps, no blending
+    fireImg.data[o] = s[0]; fireImg.data[o+1] = s[1]; fireImg.data[o+2] = s[2]; fireImg.data[o+3] = 255;
+  }
+  fireCtx.putImageData(fireImg, 0, 0);
+  ctx.drawImage(fireCv, 0, 0, FW*2, FH*2);
+}
+
+// ---------------------------------------------------------------- the splash
+const TITLE = 'VELVET';
+const TILT = [-7, 5, -3, 8, -5, 3], STYLE = [0, 1, 2, 1, 0, 2], JIT = [0, -2, 1, -1, 2, 0];
+const STATUS = ['WAKING UP', 'KEYBOARD', 'WI-FI', 'SOUND', 'SENSORS', 'READY'];
+const T_EXIT = 2.45, T_END = 2.95, T_LOOP = 4.3;
+const hubImg = new Image(); hubImg.src = HUB;
+
+function title(t, x, base){
+  let cursor = 0;
+  const cap = anton('H', 30, '#fff'), capH = cap.y1 - cap.y0 + 1;
+  for(let i = 0; i < TITLE.length; i++){
+    const size = i === 0 ? 40 : 30;
+    const p = prog(t, 0.42 + i*0.075, 0.42 + i*0.075 + 0.26);
+    const tile = STYLE[i] === 0 ? P.white : STYLE[i] === 1 ? P.ink : P.red;
+    const ink = STYLE[i] === 0 ? P.ink : P.white;
+    const g = anton(TITLE[i], size, ink);
+    const gw = g.x1 - g.x0 + 1, bh = i === 0 ? (g.y1 - g.y0 + 1) : capH, bw = Math.max(gw, bh*0.4);
+    if(p > 0){
+      const e = back(p), drop = (1 - e) * -46, tilt = TILT[i] + (1 - e) * 28;
+      const cx = x + cursor + (bw + 8)/2, cy = base - bh/2 + JIT[i] + drop;
+      poly(tilted(cx + 2, cy + 2, bw + 8, bh + 8, tilt), STYLE[i] === 1 ? P.red : P.ink);
+      poly(tilted(cx, cy, bw + 8, bh + 8, tilt), tile);
+      ctx.drawImage(g.img, Math.round(cx - gw/2 - g.x0), Math.round(cy + bh/2 - (g.y1 + 1)));
+    }
+    cursor += bw + 7;
+  }
+  return cursor;
+}
+
+function scene(t){
+  // background
+  ctx.fillStyle = variant === 'B' ? P.deep : P.navy; ctx.fillRect(0, 0, W, H);
+  if(variant === 'A'){
+    slant(-40, 0, 170, 170, 50, P.blue);
+    slant(96, 0, 40, 170, 50, P.red);
+    slant(210, 0, 160, 170, 50, P.deep);
+    halftone(0, 104, 120, 66, P.deep, 1);
+  }
+  halftone(224, 0, 96, 60, variant === 'B' ? P.row : P.navy, 0);
+
+  // fire behind everything else
+  if(variant === 'B'){
+    const now = performance.now();
+    if(now - fireLast > 33){
+      const src = t < 0.3 ? 0 : t < T_EXIT - 0.25 ? Math.round(36 * easeOut(prog(t, 0.3, 0.9)) + (t > 2.15 ? 0 : 0)) : 0;
+      fireStep(t > 2.12 && t < 2.3 ? 38 : src);
+      fireLast = now;
+    }
+    fireDraw();
+    slant(-20, 123, 360, 60, 14, P.ink);   // black floor the flames rise from; keeps the loading bar readable
+  }
+
+  // star burst behind the title
+  const sp = prog(t, 0.85, 1.2);
+  if(sp > 0){
+    const s = back(sp);
+    poly(star(118, 74, 62*s, 30*s, 10, t*70), P.burst === P.ink && variant === 'B' ? P.row : P.burst);
+  }
+
+  // title
+  const punch = t > 1.0 && t < 1.08 ? -2 : 0;
+  title(t, 66, 86 + punch);
+
+  // strip: CARDPUTERZERO · POCKET OS
+  const sp2 = easeOut(prog(t, 1.05, 1.35));
+  if(sp2 > 0){
+    const x = -260 + 300 * sp2;
+    slant(x, 101, 252, 17, 8, P.ink);
+    ter('CARDPUTERZERO', x + 18, 103, P.gold);
+    ter('POCKET OS', x + 130, 103, P.white);
+  }
+
+  // loading segments
+  const lp = prog(t, 1.3, 2.2);
+  if(t > 1.2){
+    const n = 10, filled = Math.floor(lp * n + 0.001);
+    for(let i = 0; i < n; i++){
+      const x = 34 + i*25, y = 130;
+      if(i < filled){ slant(x + 2, y + 2, 22, 9, 4, P.red); slant(x, y, 22, 9, 4, P.white); }
+      else slant(x, y, 22, 9, 4, P.row);
+    }
+    const st = STATUS[Math.min(STATUS.length - 1, Math.floor(lp * (STATUS.length - 1) + 0.001))];
+    const ready = lp >= 1;
+    ter(st, 34, 146, ready ? P.gold : P.soft);
+    ter(String(Math.round(lp*100)).padStart(3, '0') + '%', 254, 146, ready ? P.gold : P.soft);
+  }
+  ter('v0.9', 284, 4, P.soft);
+}
+
+// ---------------------------------------------------------------- sound (optional)
+let ac = null, soundOn = true, played = new Set();
+function audio(){ if(!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); if(ac.state === 'suspended') ac.resume(); return ac; }
+function swoosh(){
+  const a = audio(), n = a.sampleRate * 0.22, b = a.createBuffer(1, n, a.sampleRate), d = b.getChannelData(0);
+  for(let i = 0; i < n; i++) d[i] = (Math.random()*2 - 1) * Math.sin(Math.PI * Math.pow(i/n, 0.6));
+  const s = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+  f.type = 'bandpass'; f.Q.value = 1.2;
+  f.frequency.setValueAtTime(500, a.currentTime); f.frequency.exponentialRampToValueAtTime(6000, a.currentTime + 0.22);
+  g.gain.value = 0.5; s.buffer = b; s.connect(f).connect(g).connect(a.destination); s.start();
+}
+function tone(f0, f1, dur, vol, type){
+  const a = audio(), o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'square'; o.frequency.setValueAtTime(f0, a.currentTime); o.frequency.linearRampToValueAtTime(f1, a.currentTime + dur);
+  g.gain.setValueAtTime(vol, a.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
+  o.connect(g).connect(a.destination); o.start(); o.stop(a.currentTime + dur);
+}
+function cue(t){
+  if(!soundOn || !ac) return;
+  const at = (k, time, fn) => { if(t >= time && !played.has(k)){ played.add(k); fn(); } };
+  at('in', 0.0, swoosh);
+  for(let i = 0; i < TITLE.length; i++) at('l'+i, 0.5 + i*0.075, () => tone(2400, 2200, 0.035, 0.06, 'sine'));
+  at('star', 0.9, () => tone(988, 1480, 0.12, 0.05));
+  at('ready', 2.2, () => { tone(784, 784, 0.07, 0.05); setTimeout(() => tone(1175, 1175, 0.07, 0.05), 50); setTimeout(() => tone(1568, 1568, 0.2, 0.05), 100); });
+  at('out', T_EXIT, swoosh);
+}
+
+// ---------------------------------------------------------------- loop
+let t0 = performance.now(), speed = 1;
+function frame(now){
+  const t = (now - t0) / 1000 * speed;
+  if(t >= T_LOOP){ t0 = now; played.clear(); fire.fill(0); requestAnimationFrame(frame); return; }
+  if(t < T_EXIT + 0.17) scene(t);
+  else { ctx.drawImage(hubImg, 0, 0); }
+  bands(t, -0.2, true);      // intro: bands already covering at t=0, sweep away
+  if(t < 0.03){ ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); }
+  bands(t, T_EXIT, true);    // exit into the home menu
+  cue(t);
+  document.getElementById('time').textContent = Math.min(t, T_END).toFixed(2) + ' s';
+  requestAnimationFrame(frame);
+}
+
+function restart(){ t0 = performance.now(); played.clear(); fire.fill(0); }
+document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { variant = b.dataset.v; document.querySelectorAll('[data-v]').forEach(x => x.setAttribute('aria-pressed', x === b)); audio(); restart(); });
+document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { theme = +b.dataset.t; P = THEMES[theme]; glyphCache.clear(); document.querySelectorAll('[data-t]').forEach(x => x.setAttribute('aria-pressed', x === b)); audio(); restart(); });
+document.getElementById('replay').onclick = () => { audio(); restart(); };
+document.getElementById('slow').onclick = e => { speed = speed === 1 ? 0.25 : 1; e.target.setAttribute('aria-pressed', speed !== 1); restart(); };
+document.getElementById('snd').onclick = e => { soundOn = !soundOn; e.target.setAttribute('aria-pressed', soundOn); if(soundOn) audio(); };
+document.fonts.load('40px Anton').then(() => { glyphCache.clear(); restart(); requestAnimationFrame(frame); });
+</script>
+</body>
+</html>
