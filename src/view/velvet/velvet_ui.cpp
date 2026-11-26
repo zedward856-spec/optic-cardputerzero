@@ -4657,9 +4657,14 @@ void VelvetUI::sensors_tick_cb(lv_timer_t* t) {
     const Motion m = self->motion_ = self->sensors_->read();
     char buf[200];
     const float g = std::sqrt(m.ax * m.ax + m.ay * m.ay + m.az * m.az);
+    // the sensors' names head the numbers; two chips ("BMI270+BMM150") take a line each, so the
+    // name never runs past the card's edge
+    std::string src = m.source;
+    if (src.size() > 10) { const size_t plus = src.find('+'); if (plus != std::string::npos) src.insert(plus, "\n"); }
+    lv_obj_set_y(self->sens_values_, src.find('\n') != std::string::npos ? 31 : 36);
     std::snprintf(buf, sizeof buf,
-                  "%s\nAX %+6.2f\nAY %+6.2f\nAZ %+6.2f\nGX %+6.1f\nGY %+6.1f\nGZ %+6.1f\n|G|  %5.2f",
-                  m.source.c_str(), m.ax, m.ay, m.az, m.gx, m.gy, m.gz, g);
+                  "%s\nAX %+6.2f\nAY %+6.2f\nAZ %+6.2f\nGX %+6.1f\nGY %+6.1f\nGZ %+6.1f\n|G|%6.2f",
+                  src.c_str(), m.ax, m.ay, m.az, m.gx, m.gy, m.gz, g);
     lv_label_set_text(self->sens_values_, m.valid ? buf : "No data");
     if (m.has_heading) {
         std::snprintf(buf, sizeof buf, "%03d\xC2\xB0 %s", static_cast<int>(m.heading + 0.5f) % 360, compass_point(m.heading));
@@ -5620,6 +5625,71 @@ void VelvetUI::global_mute() {
     device_->set_volume(gvol_);
 }
 
+// A small note over everything, gone after 3 seconds: the volume when its keys are pressed
+// (fn+A / S / D), what the media keys did (fn+Q / W / E). `bar` < 0: text only.
+void VelvetUI::osd_show(const std::string& text, int bar) {
+    if (!osd_) {
+        osd_ = pill(lv_layer_top(), 70, 6, 180, 30, kWhite, 10);
+        osd_lbl_ = label(osd_, "", f_.mono10, kInk, 10, 2);
+        osd_track_ = pill(osd_, 10, 19, 160, 6, kLight);
+        osd_fill_ = pill(osd_, 10, 19, 6, 6, kInk);
+    }
+    lv_label_set_text(osd_lbl_, text.c_str());
+    if (bar >= 0) {
+        lv_obj_remove_flag(osd_track_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(osd_fill_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_width(osd_fill_, 6 + 154 * std::min(100, bar) / 100);
+        lv_obj_set_height(osd_, 30);
+    } else {
+        lv_obj_add_flag(osd_track_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(osd_fill_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(osd_, 20);
+    }
+    lv_obj_remove_flag(osd_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(osd_);
+    if (osd_timer_) lv_timer_delete(osd_timer_);
+    osd_timer_ = lv_timer_create(
+        [](lv_timer_t* t) {
+            auto* self = static_cast<VelvetUI*>(lv_timer_get_user_data(t));
+            lv_timer_delete(t);
+            self->osd_timer_ = nullptr;
+            if (self->osd_) lv_obj_add_flag(self->osd_, LV_OBJ_FLAG_HIDDEN);
+        },
+        3000, this);
+}
+
+void VelvetUI::osd_volume(int v) {
+    if (v < 0) { osd_show("No volume control here", -1); return; }
+    char b[40];
+    if (v == 0 || device_->muted()) { std::snprintf(b, sizeof b, "Volume   muted"); osd_show(b, 0); return; }
+    std::snprintf(b, sizeof b, "Volume   %d%%", v);
+    osd_show(b, v);
+}
+
+// fn+Q play / pause, fn+W the song before, fn+E the next one: the app's own player, on any page.
+void VelvetUI::media_key(uint32_t key) {
+    if (!music_) { osd_show("Nothing is playing", -1); return; }
+    const Music::Status st = mus_status();
+    if (!st.playing) { osd_show("Nothing is playing", -1); return; }
+    if (key == kKeyMediaPlay) {
+        music_->toggle_pause();
+        osd_show(st.paused ? "Playing" : "Paused", -1);
+    } else {
+        int idx = -1;
+        for (size_t i = 0; i < mus_results_.size(); ++i) if (mus_results_[i].id == mus_playing_id_) idx = static_cast<int>(i);
+        const int to = idx + (key == kKeyMediaNext ? 1 : -1);
+        if (idx < 0 || to < 0 || to >= static_cast<int>(mus_results_.size())) {
+            osd_show(key == kKeyMediaNext ? "No next song" : "No song before", -1);
+        } else {
+            mus_sel_ = to;
+            mus_playing_id_ = mus_results_[to].id;
+            music_->play(mus_results_[to]);
+            osd_show(font_safe_text(f_.mono10, mus_results_[to].title).substr(0, 20), -1);
+        }
+    }
+    if (page_kind_ == Page::Music && !mus_vid_) music_render();
+}
+
 bool VelvetUI::handle_key(uint32_t key, bool long_pressed) {
     // Hold Backspace / Delete: after 400 ms it repeats every 45 ms until let go.
     // (Not in the browser's tab list, where DEL closes a tab.)
@@ -5658,11 +5728,16 @@ bool VelvetUI::handle_key(uint32_t key, bool long_pressed) {
                     self->volkey_timer_ = nullptr;
                     const int v = self->device_->volume();
                     if (v >= 0) { self->gvol_ = v; self->device_->set_volume(v); }
+                    self->osd_volume(v);
                     if (self->page_kind_ == Page::Music && !self->mus_vid_) self->music_render();
                     else if (self->page_kind_ == Page::System) self->system_render();
                 },
                 desktop_does_it ? 500 : 30, this);
         }
+        return true;
+    }
+    if (key == kKeyMediaPlay || key == kKeyMediaPrev || key == kKeyMediaNext) {   // fn+Q / W / E, on every page
+        if (!long_pressed) media_key(key);
         return true;
     }
     if (splash_) {  // any key skips the boot animation

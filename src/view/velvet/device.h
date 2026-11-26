@@ -80,6 +80,7 @@ public:
     virtual bool set_brightness(int percent) = 0;
     virtual int volume() = 0;
     virtual bool set_volume(int percent) = 0;
+    virtual bool muted() { return false; }   // the output is muted (apart from its volume number)
     virtual std::string hostname() = 0;
 
     // The Optic desktop on the HDMI screen: what is there now, and on / off. Not instant (it asks

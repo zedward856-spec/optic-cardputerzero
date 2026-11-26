@@ -1,7 +1,7 @@
 {
   "app_name": "Optic Suite",
   "package_name": "optic-cardputerzero",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "The Optic UI for the M5Stack CardputerZero",
   "store": {
     "summary": "A full shell for your CardputerZero: terminal, browser, music, camera and more.",

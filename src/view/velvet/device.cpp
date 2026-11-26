@@ -684,6 +684,8 @@ public:
         return v;
     }
 
+    bool muted() override { return run({"pactl", "get-sink-mute", "@DEFAULT_SINK@"}).out.find("yes") != std::string::npos; }
+
     // The volume is the louder side: with a balance set (one ear turned down), that is the
     // number the user thinks of as "the volume".
     int volume() override {

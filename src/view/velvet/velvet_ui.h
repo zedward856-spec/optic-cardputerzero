@@ -536,6 +536,14 @@ private:
     int gvol_{-1}, gvol_unmuted_{50};   // the device's volume as last read / set here (-1: no mixer)
     std::string mus_prep_id_;           // the highlighted track, and how long it has been
     int mus_prep_n_{0};
+    void osd_show(const std::string& text, int bar);
+    void osd_volume(int v);
+    void media_key(uint32_t key);
+    lv_obj_t* osd_{};
+    lv_obj_t* osd_lbl_{};
+    lv_obj_t* osd_track_{};
+    lv_obj_t* osd_fill_{};
+    lv_timer_t* osd_timer_{};
     uint32_t volkey_{0};
     int volkey_from_{-1};
     lv_timer_t* volkey_timer_{nullptr};

@@ -17,6 +17,9 @@ constexpr uint32_t kKeyBackTab = kKeySpecial | 4;   // Shift+Tab
 constexpr uint32_t kKeyVolUp = kKeySpecial | 5;     // the keyboard's volume keys: fn+D, fn+S, fn+A
 constexpr uint32_t kKeyVolDown = kKeySpecial | 6;
 constexpr uint32_t kKeyMute = kKeySpecial | 7;
+constexpr uint32_t kKeyMediaPlay = kKeySpecial | 8;   // fn+Q: play / pause
+constexpr uint32_t kKeyMediaPrev = kKeySpecial | 9;   // fn+W: the song before
+constexpr uint32_t kKeyMediaNext = kKeySpecial | 10;  // fn+E: the next song
 constexpr uint32_t kKeyF1 = kKeySpecial | 0x10;     // F1..F12 = kKeyF1 + 0..11
 
 inline bool is_ctrl_key(uint32_t k) { return (k & 0xFF000000) == kKeyCtrl; }

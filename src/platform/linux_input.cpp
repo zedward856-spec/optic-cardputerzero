@@ -290,6 +290,7 @@ bool ctrl_l = false, ctrl_r = false, alt_l = false, alt_r = false;
 #define KEY_FN 0x1d0
 #endif
 bool fn_down = false, fn_used = false;
+bool cz_fn_down = false, cz_fn_used = false;   // the CardputerZero's own fn key (code 0x185) is held
 int layer = 0;            // 0 normal, 1 orange, 2 blue
 bool layer_used = false;  // a key was pressed since the layer turned on
 
@@ -351,11 +352,21 @@ uint32_t map_evdev_key(uint16_t code, int value) {
             case KEY_COMPOSE: case 0x17f: mod_tap(1); break;   // 0x17f: the CardputerZero's SYM key (its driver sends KEY_CD)
             case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: case KEY_CAPSLOCK: mod_tap(2); break;
             case KEY_FN: case 0x185: mod_tap(3); break;        // 0x185: its fn key (KEY_DVD)
+            // media keys: fn+Q / W / E on the CardputerZero (its driver keeps fn to itself, so the
+            // held fn is tracked here from the key it does report), or a keyboard's own media keys
+            case KEY_Q: if (cz_fn_down) { cz_fn_used = true; return velvet::kKeyMediaPlay; } break;
+            case KEY_W: if (cz_fn_down) { cz_fn_used = true; return velvet::kKeyMediaPrev; } break;
+            case KEY_E: if (cz_fn_down) { cz_fn_used = true; return velvet::kKeyMediaNext; } break;
+            case KEY_PLAYPAUSE: case KEY_PLAYCD: case KEY_PAUSECD: return velvet::kKeyMediaPlay;
+            case KEY_PREVIOUSSONG: return velvet::kKeyMediaPrev;
+            case KEY_NEXTSONG: return velvet::kKeyMediaNext;
             case KEY_LEFTCTRL: case KEY_RIGHTCTRL: mod_tap(4); break;
             case KEY_LEFTALT: case KEY_RIGHTALT: mod_tap(5); break;
             default: break;
         }
     }
+    if (code == 0x185) { cz_fn_down = value != 0; return 0; }
+    if (cz_fn_down && value == 0 && (code == KEY_Q || code == KEY_W || code == KEY_E)) return 0;
     switch (code) {
         case KEY_LEFTSHIFT: shift_l = value != 0; return 0;
         case KEY_RIGHTSHIFT: shift_r = value != 0; return 0;
