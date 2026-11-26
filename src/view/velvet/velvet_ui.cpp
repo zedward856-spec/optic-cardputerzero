@@ -241,7 +241,7 @@ lv_obj_t* hints_r(lv_obj_t* parent, int32_t right, int32_t y, lv_font_t* font,
 
 // ---- line icons (14x14), drawn in the object's text colour ----
 enum Icon { IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcPwn, IcStats, IcWifi, IcSystem,
-            IcNet, IcEth, IcTor, IcTailscale, IcSpeed, IcTools, IcOptic, IcHdmi, IcBt };
+            IcNet, IcEth, IcTor, IcTailscale, IcSpeed, IcTools, IcOptic, IcHdmi, IcBt, IcIr };
 
 // The Optic eye (the logo's two lids and iris halves, logo units 7.5..112.5 x 30..90), [w] px
 // wide with its top-left at (x, y) from (ox, oy). Its height is w * 4 / 7.
@@ -368,6 +368,16 @@ void draw_icon(lv_layer_t* layer, int ic, lv_area_t a, lv_color_t col) {
             seg(11, 4, 3, 10, 0.55f);
             seg(7, 13.5f, 11, 10, 0.55f);
             seg(11, 10, 3, 4, 0.55f);
+            break;
+        case IcIr:  // a remote control, its beam going up
+            frame(3, 5, 8, 9);
+            rect(6, 7, 2, 2);
+            rect(5, 10, 1, 1);
+            rect(8, 10, 1, 1);
+            rect(5, 12, 1, 1);
+            rect(8, 12, 1, 1);
+            ring(7, 6.5f, 4.2f, 215, 325);
+            ring(7, 6.5f, 6.5f, 225, 315);
             break;
         case IcHdmi:  // a screen on its stand
             frame(0, 1, 14, 9);
@@ -519,11 +529,11 @@ bool is_row_up(uint32_t k) { return k == LV_KEY_UP || k == ';' || k == 'f'; }
 bool is_row_down(uint32_t k) { return k == LV_KEY_DOWN || k == '.' || k == 'x'; }
 
 // ---- content ----
-const char* kHubItems[] = {"Terminal", "Browser", "Music", "Camera", "Gallery", "Sensors", "Network", "Bluetooth", "HDMI", "System"};
-const Icon kHubIcons[] = {IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcNet, IcBt, IcHdmi, IcSystem};
+const char* kHubItems[] = {"Terminal", "Browser", "Music", "Camera", "Gallery", "Sensors", "Network", "Bluetooth", "Remote", "HDMI", "System"};
+const Icon kHubIcons[] = {IcTerminal, IcBrowser, IcMusic, IcCamera, IcGallery, IcSensors, IcNet, IcBt, IcIr, IcHdmi, IcSystem};
 const Page kHubPages[] = {Page::Terminal, Page::Browser, Page::Music, Page::Camera, Page::Gallery,
-                          Page::Sensors,  Page::Net,     Page::Bluetooth, Page::Hdmi, Page::System};
-constexpr int kHubCount = 10;
+                          Page::Sensors,  Page::Net,     Page::Bluetooth, Page::Remote, Page::Hdmi, Page::System};
+constexpr int kHubCount = 11;
 constexpr int kHubVisible = 5;   // menu rows on screen; the list scrolls past that
 constexpr int32_t kHubY0 = 29;   // first menu row
 constexpr int32_t kHubDy = 24;   // menu row spacing
@@ -748,6 +758,10 @@ void VelvetUI::update_hub_status() {
                 std::string who;
                 for (const auto& d : b.devices) if (d.connected) { who = d.name; break; }
                 std::snprintf(buf, sizeof buf, "%.16s", who.c_str());
+            } else if (kHubPages[i] == Page::Remote) {
+                if (!ir_) ir_ = make_ir();
+                const size_t n = ir_->state().remotes.size();
+                if (n) std::snprintf(buf, sizeof buf, "%zu saved", n);
             } else if (kHubPages[i] == Page::Net) {
                 std::snprintf(buf, sizeof buf, "%.16s", !net_.radio_on ? "Off" : net_.connected ? net_.ssid.c_str() : "Not connected");
             } else if (kHubPages[i] == Page::System && pw.valid) {
@@ -1044,6 +1058,12 @@ void VelvetUI::clear_page_timers() {
         bt_timer_ = nullptr;
     }
     bt_box_ = bt_note_ = nullptr;
+    if (ir_timer_) {
+        lv_timer_delete(ir_timer_);
+        ir_timer_ = nullptr;
+    }
+    if (ir_box_ && ir_) ir_->record_cancel();   // leaving the page ends a recording
+    ir_box_ = ir_note_ = ir_head_ = ir_hint_ = nullptr;
     if (hdmi_timer_) {
         lv_timer_delete(hdmi_timer_);
         hdmi_timer_ = nullptr;
@@ -1139,6 +1159,7 @@ void VelvetUI::build_page(Page page) {
         case Page::System: build_system(page_); break;
         case Page::Hdmi: build_hdmi(page_); break;
         case Page::Bluetooth: build_bluetooth(page_); break;
+        case Page::Remote: build_remote(page_); break;
         case Page::Terminal: build_terminal(page_); break;
         case Page::Camera: build_camera(page_); break;
         case Page::Sensors: build_sensors(page_); break;
@@ -1262,6 +1283,7 @@ void VelvetUI::build_system(lv_obj_t* p) {
 
     sys_sel_ = sys_vis_.empty() ? 0 : sys_vis_.front();
     frames_ = 0;
+    sys_vals_at_ = 0;
     system_render();
     lv_label_set_text(fps_label_, "-- FPS  00:00");
     sys_timer_ = lv_timer_create(system_tick_cb, 1000, this);
@@ -1396,6 +1418,489 @@ void VelvetUI::bt_tick_cb(lv_timer_t* t) {
     self->bt_render();
 }
 
+// ---------------------------------------------------------------- Remote (infrared)
+// Saved remotes (Flipper .ir files), their buttons, recording a button from a real remote and
+// the online Flipper-IRDB: one page, seven screens. The lists look and move like Bluetooth's;
+// names are typed like a Wi-Fi password. ESC goes back one screen.
+namespace {
+enum { kIrList, kIrRemote, kIrNameRemote, kIrRecWait, kIrRecCaught, kIrNameButton, kIrDb };
+enum { kIrRowRemote, kIrRowRecordNew, kIrRowOnline, kIrRowButton, kIrRowRecordMore, kIrRowEntry };
+constexpr int kIrVisible = 5;
+constexpr size_t kIrRemoteNameMax = 24, kIrButtonNameMax = 20, kIrFilterMax = 16;
+constexpr uint32_t kIrFlashMs = 3000;
+
+// A database name as it is shown: "Sony_Bravia.ir" -> "Sony Bravia".
+std::string ir_pretty(std::string s) {
+    if (s.size() > 3 && s.compare(s.size() - 3, 3, ".ir") == 0) s.resize(s.size() - 3);
+    std::replace(s.begin(), s.end(), '_', ' ');
+    return s;
+}
+
+std::string ir_join(const std::vector<std::string>& parts, const char* sep) {
+    std::string r;
+    for (const auto& p : parts) r += (r.empty() ? "" : sep) + p;
+    return r;
+}
+
+// True if a word of [name] starts with [filter] (lower case): "so" finds Sony, not Panasonic.
+// '_' and ' ' count as the same.
+bool ir_matches(const std::string& name, const std::string& filter) {
+    if (filter.empty()) return true;
+    std::string low;
+    for (char c : name) low += c == '_' ? ' ' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (size_t at = low.find(filter); at != std::string::npos; at = low.find(filter, at + 1))
+        if (at == 0 || low[at - 1] == ' ' || low[at - 1] == '-') return true;
+    return false;
+}
+
+// One line of [w] pixels; what does not fit ends in dots (without a height the label would wrap).
+void ir_one_line(lv_obj_t* l, lv_font_t* font, int32_t w) {
+    lv_obj_set_size(l, w, lv_font_get_line_height(font));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+}
+}  // namespace
+
+std::vector<VelvetUI::IrRow> VelvetUI::ir_rows() {
+    std::vector<IrRow> r;
+    const IrState& s = ir_state_;
+    if (ir_view_ == kIrList) {
+        for (size_t i = 0; i < s.remotes.size(); ++i)
+            r.push_back({kIrRowRemote, static_cast<int>(i), s.remotes[i].name,
+                         std::to_string(s.remotes[i].buttons) + (s.remotes[i].buttons == 1 ? " button" : " buttons")});
+        r.push_back({kIrRowRecordNew, 0, "Record a new remote", "OK"});
+        r.push_back({kIrRowOnline, 0, "Find a device online", "OK"});
+    } else if (ir_view_ == kIrRemote) {
+        for (size_t i = 0; i < s.buttons.size(); ++i)
+            r.push_back({kIrRowButton, static_cast<int>(i), s.buttons[i].name, s.buttons[i].raw ? "raw" : ir_describe(s.buttons[i])});
+        r.push_back({kIrRowRecordMore, 0, "Record another button", "OK"});
+    } else if (ir_view_ == kIrDb && !s.db_busy && s.db_error.empty() && s.db_path == ir_join(ir_db_path_, "/")) {
+        for (size_t i = 0; i < s.db.size(); ++i)
+            if (ir_matches(s.db[i].name, ir_filter_))
+                r.push_back({kIrRowEntry, static_cast<int>(i), ir_pretty(s.db[i].name), s.db[i].folder ? ">" : ""});
+    }
+    return r;
+}
+
+void VelvetUI::build_remote(lv_obj_t* p) {
+    build_page_chrome(p, "Remote", false);   // ESC is in the bottom hints: the top has the remote's name
+    if (!ir_) ir_ = make_ir();
+    ir_head_ = label(p, "", f_.mono10, kFaint, 78, 7);
+    ir_one_line(ir_head_, f_.mono10, std::max<int32_t>(8, lv_obj_get_style_x(page_status_, LV_PART_MAIN) - 4 - 78));
+    ir_box_ = plain(p);
+    lv_obj_set_pos(ir_box_, 0, 28);
+    lv_obj_set_size(ir_box_, 320, kIrVisible * 20 + 2);
+    ir_note_ = label(p, "", f_.mono10, kGrey, 8, 134);
+    ir_one_line(ir_note_, f_.mono10, 304);
+    ir_hint_ = nullptr;
+    ir_hint_id_ = -1;
+    ir_view_ = kIrList;
+    ir_sel_ = ir_top_ = 0;
+    ir_del_row_ = -1;
+    ir_flash_.clear();
+    ir_filter_.clear();
+    ir_db_path_.clear();
+    ir_db_sel_.clear();
+    ir_->open("");
+    ir_state_ = ir_->state();
+    ir_note_seen_ = ir_state_.note_id;   // what happened before the page opened is old news
+    ir_saved_seen_ = ir_state_.saved_id;
+    ir_render();
+    ir_timer_ = lv_timer_create(ir_tick_cb, 300, this);
+}
+
+// The hint line at the bottom, one set per screen (rebuilt only when it changes).
+void VelvetUI::ir_set_hints(int id) {
+    if (id == ir_hint_id_ && ir_hint_) return;
+    if (ir_hint_) lv_obj_delete(ir_hint_);
+    ir_hint_id_ = id;
+    lv_obj_t* p = lv_obj_get_parent(ir_box_);
+    switch (id) {
+        case 0: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Open"}, {"DEL", "Delete"}, {"ESC", "Back"}}); break;
+        case 1: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Send"}, {"DEL", "Delete"}, {"ESC", "Back"}}); break;
+        case 2: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Next"}, {"ESC", "Cancel"}}); break;
+        case 3: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"ESC", "Cancel"}}); break;
+        case 4: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Name it"}, {"TAB", "Raw"}, {"ESC", "Cancel"}}); break;
+        case 5: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Name it"}, {"ESC", "Cancel"}}); break;
+        case 6: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Again"}, {"ESC", "Back"}}); break;
+        case 7: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Save"}, {"ESC", "Cancel"}}); break;
+        default: ir_hint_ = hints_r(p, 316, 151, f_.mono10, {{"OK", "Open"}, {"ESC", "Back"}}); break;
+    }
+}
+
+// A line in the note row for three seconds.
+void VelvetUI::ir_flash(const std::string& text) {
+    ir_flash_ = text;
+    ir_flash_at_ = lv_tick_get();
+}
+
+// What the backend did since the last look: a new note is shown for a while, a caught button
+// moves the recording on, a downloaded remote opens.
+void VelvetUI::ir_sync() {
+    const IrState& s = ir_state_;
+    if (s.note_id != ir_note_seen_) {
+        ir_note_seen_ = s.note_id;
+        ir_flash(s.note);
+    }
+    if (ir_view_ == kIrRecWait && s.rec == IrRec::Caught) {
+        ir_view_ = kIrRecCaught;
+        ir_keep_raw_ = false;
+        sound_->play(Sfx::Open);
+    }
+    if (s.saved_id != ir_saved_seen_) {
+        ir_saved_seen_ = s.saved_id;
+        if (ir_view_ == kIrDb && !s.open.empty()) {
+            ir_view_ = kIrRemote;
+            ir_sel_ = ir_top_ = 0;
+        }
+    }
+}
+
+void VelvetUI::ir_render() {
+    if (!ir_box_) return;
+    lv_obj_clean(ir_box_);
+    const IrState& s = ir_state_;
+    const bool flash = !ir_flash_.empty() && lv_tick_elaps(ir_flash_at_) < kIrFlashMs;
+    std::string head, note;
+    // a card with a title, up to three lines under it, and for names a field to type in
+    auto card = [&](const char* title, const std::string& l1, const std::string& l2, const std::string& l3, bool field) {
+        lv_obj_t* box = pill(ir_box_, 4, 2, 312, 98, kDark, 12);
+        label(box, title, f_.mono12, kWhite, 12, 8);
+        lv_obj_t* a = label(box, font_safe_text(f_.mono10, l1).c_str(), f_.mono10, field ? kGrey : kWhite, 12, 30);
+        if (l1.find('\n') == std::string::npos) ir_one_line(a, f_.mono10, 288);   // (36 columns)
+        if (field) {
+            lv_obj_t* f = pill(box, 6, 48, 300, 24, kBg);
+            std::string shown = ir_text_;
+            if (shown.size() > 31) shown = shown.substr(shown.size() - 31);
+            shown += (lv_tick_get() / 400) % 2 == 0 ? "_" : " ";
+            label(f, shown.c_str(), f_.mono12, kWhite, 12, 4);
+            label(box, l2.c_str(), f_.mono10, kGrey, 12, 78);
+        } else {
+            label(box, l2.c_str(), f_.mono10, kGrey, 12, 46);
+            label(box, l3.c_str(), f_.mono10, kGrey, 12, 74);
+        }
+    };
+    char buf[96];
+    switch (ir_view_) {
+        case kIrNameRemote:
+            ir_set_hints(2);
+            card("New remote", "Its name", ir_info_, "", true);
+            break;
+        case kIrNameButton:
+            ir_set_hints(7);
+            head = ir_target_;
+            card("Name this button", ir_keep_raw_ || !s.caught_decoded ? "raw timings" : ir_describe(s.caught), ir_info_, "", true);
+            break;
+        case kIrRecWait:
+            head = ir_target_;
+            if (s.rec == IrRec::Failed) {
+                ir_set_hints(6);
+                card("Can't listen", s.rec_error, "", "", false);
+            } else if (s.rec == IrRec::Nothing) {
+                ir_set_hints(6);
+                card("Nothing came", "No button was seen in 30 seconds.", "", "", false);
+            } else {
+                ir_set_hints(3);
+                std::snprintf(buf, sizeof buf, "Gives up in %d s", std::max(0, s.rec_left_s));
+                card("Listening...", "Point the remote at the\nCardputerZero and press the button.", "", buf, false);
+            }
+            break;
+        case kIrRecCaught: {
+            head = ir_target_;
+            ir_set_hints(s.caught_decoded ? 4 : 5);
+            const size_t pulses = (s.caught.data.size() + 1) / 2;
+            std::string what, how;
+            if (s.caught_decoded) {
+                std::snprintf(buf, sizeof buf, "%.10s  address %02X  command %02X", s.caught.protocol.c_str(), s.caught.address, s.caught.command);
+                what = buf;
+                std::snprintf(buf, sizeof buf, "Kept as raw timings, %zu pulses", pulses);
+                how = ir_keep_raw_ ? buf : "TAB keeps the raw timings instead";
+            } else {
+                std::snprintf(buf, sizeof buf, "raw, %zu pulses", pulses);
+                what = buf;
+                how = "Not a protocol known here: kept as heard";
+            }
+            card("Caught it", what, how, "", false);
+            break;
+        }
+        default:
+            ir_render_rows();
+            break;
+    }
+    if (ir_view_ == kIrList) {
+        head = s.demo ? "Demo" : "";
+    } else if (ir_view_ == kIrRemote) {
+        head = s.open;
+    } else if (ir_view_ == kIrDb) {
+        head = ir_db_path_.empty() ? "Online" : ir_pretty(ir_db_path_.back());   // the folder it is in
+    }
+    lv_label_set_text(ir_head_, font_safe_text(f_.mono10, head).c_str());
+
+    // the note row: a pending delete, then what just happened, then what this row is
+    const std::vector<IrRow> rows = ir_rows();
+    const IrRow* cur = ir_sel_ >= 0 && ir_sel_ < static_cast<int>(rows.size()) ? &rows[ir_sel_] : nullptr;
+    if (ir_del_row_ >= 0 && lv_tick_elaps(ir_del_at_) < kIrFlashMs && cur && ir_del_row_ == ir_sel_) {
+        note = "DEL again deletes " + cur->left;
+    } else if (s.sending) {
+        note = "Sending...";
+    } else if (flash) {
+        note = ir_flash_;
+    } else if (ir_view_ == kIrList) {
+        note = s.scanned ? s.devices : "Looking for infrared...";
+    } else if (ir_view_ == kIrRemote && cur) {
+        if (cur->kind == kIrRowRecordMore) {
+            note = s.rx.empty() ? "No receiver found" : "Learns one more button from a remote";
+        } else {
+            const IrSignal& b = s.buttons[cur->ref];
+            if (b.raw) std::snprintf(buf, sizeof buf, "raw, %zu pulses, %u kHz", (b.data.size() + 1) / 2, (b.frequency + 500) / 1000);
+            else if (!ir_can_send(b.protocol)) std::snprintf(buf, sizeof buf, "%.10s: a protocol not known here", b.protocol.c_str());
+            else std::snprintf(buf, sizeof buf, "%.10s  address %02X  command %02X", b.protocol.c_str(), b.address, b.command);
+            note = s.tx.empty() ? "No transmitter found" : buf;
+        }
+    } else if (ir_view_ == kIrDb && s.db_error.empty()) {
+        note = ir_filter_.empty() ? (rows.empty() ? "" : "Type to filter") : "Filter: " + ir_filter_ + "_";
+    }
+    lv_label_set_text(ir_note_, font_safe_text(f_.mono10, note).c_str());
+}
+
+// The three list screens (saved remotes, a remote's buttons, a database folder).
+void VelvetUI::ir_render_rows() {
+    const IrState& s = ir_state_;
+    const std::vector<IrRow> rows = ir_rows();
+    ir_set_hints(ir_view_ == kIrList ? 0 : ir_view_ == kIrRemote ? 1 : 8);
+    if (rows.empty()) {   // only the database can be empty: busy, an error, or nothing matches
+        std::string msg;
+        if (s.db_busy || s.db_path != ir_join(ir_db_path_, "/")) msg = "Asking GitHub...";
+        else if (!s.db_error.empty()) msg = s.db_error;
+        else msg = "Nothing here is called \"" + ir_filter_ + "\"";
+        lv_obj_t* l = label(ir_box_, msg.c_str(), f_.mono10, kWhite, 12, 30);
+        lv_obj_set_width(l, 296);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        return;
+    }
+    const int n = static_cast<int>(rows.size());
+    ir_sel_ = std::max(0, std::min(n - 1, ir_sel_));
+    if (ir_sel_ < ir_top_) ir_top_ = ir_sel_;
+    if (ir_sel_ >= ir_top_ + kIrVisible) ir_top_ = ir_sel_ - kIrVisible + 1;
+    ir_top_ = std::max(0, std::min(std::max(0, n - kIrVisible), ir_top_));
+    for (int i = 0; i < kIrVisible && ir_top_ + i < n; ++i) {
+        const IrRow& r = rows[ir_top_ + i];
+        const bool sel = ir_top_ + i == ir_sel_;
+        const int32_t y = 2 + i * 20;
+        if (sel) pill(ir_box_, 4, y, 312, 18, kWhite);
+        const uint32_t fg = sel ? kInk : kWhite, dim = sel ? kInk : kGrey;
+        lv_obj_t* r_l = label(ir_box_, font_safe_text(f_.mono10, r.right).c_str(), f_.mono10, dim, 0, y + 3);
+        const int32_t rw = text_width(r_l);
+        lv_obj_set_x(r_l, 316 - 8 - rw);
+        lv_obj_t* l_l = label(ir_box_, font_safe_text(f_.mono10, r.left).c_str(), f_.mono10, fg, 12, y + 3);
+        ir_one_line(l_l, f_.mono10, 316 - 8 - rw - 8 - 12);
+    }
+    if (n > kIrVisible) {   // a thin scroll mark at the right edge
+        const int32_t track = kIrVisible * 20, th = std::max<int32_t>(8, track * kIrVisible / n);
+        pill(ir_box_, 317, 2 + (track - th) * ir_top_ / std::max(1, n - kIrVisible), 2, th, kGrey);
+    }
+}
+
+// Out of the recording screens: back to the remote it was for, or to the list if that remote
+// was only being made.
+void VelvetUI::ir_leave_recording() {
+    ir_->record_cancel();
+    ir_state_ = ir_->state();
+    if (!ir_new_remote_ && !ir_state_.open.empty()) {
+        ir_view_ = kIrRemote;
+    } else {
+        ir_->open("");
+        ir_view_ = kIrList;
+    }
+    ir_sel_ = ir_top_ = 0;
+}
+
+bool VelvetUI::ir_key(uint32_t key, bool long_pressed) {
+    if (!ir_ || !ir_box_) return false;
+    const bool typing = ir_view_ == kIrNameRemote || ir_view_ == kIrNameButton;
+    if (long_pressed) {
+        if (!typing) return false;   // hold ESC and the like: as on every page
+        if (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) ir_text_.clear();
+        ir_render();
+        return true;
+    }
+    ir_state_ = ir_->state();
+    const bool back = key == LV_KEY_ESC || key == LV_KEY_BACKSPACE;
+    if (ir_view_ == kIrList && back) return false;   // the page closes the usual way
+    const int view_before = ir_view_;
+    if (key != LV_KEY_DEL) ir_del_row_ = -1;         // any other key: the delete is not meant
+
+    if (typing) {
+        const size_t max = ir_view_ == kIrNameRemote ? kIrRemoteNameMax : kIrButtonNameMax;
+        ir_info_.clear();
+        if (key == LV_KEY_ESC) {
+            if (ir_view_ == kIrNameButton) ir_leave_recording();
+            else ir_view_ = kIrList;
+        } else if (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) {
+            if (!ir_text_.empty()) ir_text_.pop_back();
+            sound_->play(Sfx::Key);
+        } else if (key == LV_KEY_ENTER && ir_view_ == kIrNameRemote) {
+            const std::string name = ir_safe_name(ir_text_);
+            if (name.empty()) ir_info_ = "Letters and digits, please";
+            else if (ir_->exists(name)) ir_info_ = "There is one called that already";
+            else {
+                ir_target_ = name;
+                ir_new_remote_ = true;
+                ir_->open("");
+                ir_->record_start();
+                ir_view_ = kIrRecWait;
+                sound_->play(Sfx::Open);
+            }
+        } else if (key == LV_KEY_ENTER) {
+            std::string name = ir_text_;
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+            if (name.empty()) ir_info_ = "Type a name first";
+            else {
+                ir_->record_keep(ir_target_, name, ir_keep_raw_);
+                ir_state_ = ir_->state();
+                if (ir_state_.rec == IrRec::Caught) {   // it could not be written: stay here
+                    ir_info_ = "Couldn't write the file";
+                } else {
+                    ir_view_ = kIrRemote;
+                    ir_top_ = 0;
+                    ir_sel_ = std::max(0, static_cast<int>(ir_state_.buttons.size()) - 1);
+                    sound_->play(Sfx::Open);
+                }
+            }
+        } else if (key >= 32 && key <= 126 && ir_text_.size() < max) {
+            ir_text_ += static_cast<char>(key);
+            sound_->play(Sfx::Key);
+        }
+    } else if (ir_view_ == kIrRecWait) {
+        if (back) ir_leave_recording();
+        else if (is_enter(key) && (ir_state_.rec == IrRec::Nothing || ir_state_.rec == IrRec::Failed)) ir_->record_start();
+    } else if (ir_view_ == kIrRecCaught) {
+        if (back) ir_leave_recording();
+        else if (key == LV_KEY_NEXT && ir_state_.caught_decoded) { ir_keep_raw_ = !ir_keep_raw_; sound_->play(Sfx::Move); }
+        else if (is_enter(key)) { ir_text_.clear(); ir_info_.clear(); ir_view_ = kIrNameButton; sound_->play(Sfx::Open); }
+    } else {
+        const std::vector<IrRow> rows = ir_rows();
+        const int n = static_cast<int>(rows.size());
+        ir_sel_ = std::max(0, std::min(std::max(0, n - 1), ir_sel_));
+        const IrRow* r = n ? &rows[ir_sel_] : nullptr;
+        const bool db = ir_view_ == kIrDb;
+        // in the database letters are the filter, so only the arrow keys move there
+        const bool up = db ? key == LV_KEY_UP || key == ';' : is_row_up(key);
+        const bool down = db ? key == LV_KEY_DOWN || key == '.' : is_row_down(key);
+        if (db && (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) && !ir_filter_.empty()) {
+            ir_filter_.pop_back();
+            ir_sel_ = ir_top_ = 0;
+        } else if (db && back) {
+            ir_filter_.clear();
+            if (ir_db_path_.empty()) {
+                ir_view_ = kIrList;
+                ir_sel_ = static_cast<int>(ir_state_.remotes.size()) + 1;   // "Find a device online"
+                ir_top_ = 0;
+            } else {
+                ir_db_path_.pop_back();
+                ir_sel_ = ir_db_sel_.empty() ? 0 : ir_db_sel_.back();
+                if (!ir_db_sel_.empty()) ir_db_sel_.pop_back();
+                ir_top_ = 0;
+                ir_->db_list(ir_join(ir_db_path_, "/"));
+            }
+        } else if (back) {   // out of a remote: back to the list, on its row
+            int at = 0;
+            for (size_t i = 0; i < ir_state_.remotes.size(); ++i)
+                if (ir_state_.remotes[i].name == ir_state_.open) at = static_cast<int>(i);
+            ir_->open("");
+            ir_view_ = kIrList;
+            ir_sel_ = at;
+            ir_top_ = 0;
+        } else if (up && n) {
+            ir_sel_ = (ir_sel_ + n - 1) % n;
+            sound_->play(Sfx::Move);
+        } else if (down && n) {
+            ir_sel_ = (ir_sel_ + 1) % n;
+            sound_->play(Sfx::Move);
+        } else if (is_enter(key) && r) {
+            sound_->play(Sfx::Open);
+            switch (r->kind) {
+                case kIrRowRemote:
+                    ir_->open(ir_state_.remotes[r->ref].name);
+                    ir_view_ = kIrRemote;
+                    ir_sel_ = ir_top_ = 0;
+                    break;
+                case kIrRowButton:
+                    if (!ir_state_.sending) ir_->send(r->ref);
+                    break;
+                case kIrRowRecordNew:
+                case kIrRowRecordMore:
+                    if (ir_state_.rx.empty()) {
+                        ir_flash(ir_state_.scanned ? "No receiver found" : "Looking for infrared...");
+                    } else if (r->kind == kIrRowRecordNew) {
+                        ir_text_.clear();
+                        ir_info_.clear();
+                        ir_view_ = kIrNameRemote;
+                    } else {
+                        ir_target_ = ir_state_.open;
+                        ir_new_remote_ = false;
+                        ir_->record_start();
+                        ir_view_ = kIrRecWait;
+                    }
+                    break;
+                case kIrRowOnline:
+                    ir_view_ = kIrDb;
+                    ir_db_path_.clear();
+                    ir_db_sel_.clear();
+                    ir_filter_.clear();
+                    ir_sel_ = ir_top_ = 0;
+                    ir_->db_list("");
+                    break;
+                case kIrRowEntry: {
+                    const IrDbEntry& e = ir_state_.db[r->ref];
+                    if (e.folder) {
+                        ir_db_sel_.push_back(r->ref);   // (its place in the unfiltered folder)
+                        ir_db_path_.push_back(e.name);
+                        ir_filter_.clear();
+                        ir_sel_ = ir_top_ = 0;
+                        ir_->db_list(ir_join(ir_db_path_, "/"));
+                    } else if (!ir_state_.db_busy) {
+                        ir_flash("Fetching " + ir_pretty(e.name) + "...");
+                        ir_->db_fetch(ir_join(ir_db_path_, "/") + "/" + e.name);
+                    }
+                    break;
+                }
+                default: break;
+            }
+        } else if (key == LV_KEY_DEL && !rep_firing_ && r && (r->kind == kIrRowRemote || r->kind == kIrRowButton)) {
+            // asked once; a second DEL on the same row within three seconds does it
+            // (a held key's repeats do not count)
+            if (ir_del_row_ == ir_sel_ && lv_tick_elaps(ir_del_at_) < kIrFlashMs) {
+                if (r->kind == kIrRowRemote) ir_->delete_remote(ir_state_.remotes[r->ref].name);
+                else ir_->delete_button(r->ref);
+                ir_del_row_ = -1;
+                sound_->play(Sfx::ToggleOff);
+            } else {
+                ir_del_row_ = ir_sel_;
+                ir_del_at_ = lv_tick_get();
+            }
+        } else if (db && key < 127 && ir_filter_.size() < kIrFilterMax &&
+                   (std::isalnum(static_cast<int>(key)) || key == '-' || key == '_')) {
+            ir_filter_ += key == '_' ? ' ' : static_cast<char>(std::tolower(static_cast<int>(key)));
+            ir_sel_ = ir_top_ = 0;
+            sound_->play(Sfx::Key);
+        }
+    }
+    if (ir_view_ != view_before) ir_flash_.clear();   // the last screen's news stays there
+    ir_state_ = ir_->state();
+    ir_sync();
+    ir_render();
+    return true;
+}
+
+void VelvetUI::ir_tick_cb(lv_timer_t* t) {
+    auto* self = static_cast<VelvetUI*>(lv_timer_get_user_data(t));
+    if (!self->ir_ || !self->ir_box_) return;
+    self->ir_state_ = self->ir_->state();
+    self->ir_sync();
+    self->ir_render();
+}
+
 void VelvetUI::build_hdmi(lv_obj_t* p) {
     build_page_chrome(p, "HDMI");
     if (device_->is_demo()) label(p, "Demo", f_.mono10, kFaint, 80, 7);
@@ -1495,7 +2000,14 @@ void VelvetUI::system_render() {
         lv_obj_set_width(sys_batt_bar_, 6);
         lv_label_set_text(sys_batt_info_, "No battery info");
     }
-    const int values[2] = {device_->brightness(), device_->volume()};
+    // Brightness and volume are asked from the system at most every 4 s (and right after a
+    // change): asking runs an outside program, and doing it on every redraw made this page crawl.
+    if (sys_vals_at_ == 0 || lv_tick_elaps(sys_vals_at_) > 4000) {
+        sys_bright_c_ = device_->brightness();
+        sys_vol_c_ = device_->volume();
+        sys_vals_at_ = lv_tick_get() ? lv_tick_get() : 1;
+    }
+    const int values[2] = {sys_bright_c_, sys_vol_c_};
     for (int i : sys_vis_) {
         const bool sel = i == sys_sel_;
         lv_obj_set_style_text_color(sys_rows_[i], C(sel ? kInk : kWhite), 0);
@@ -1626,6 +2138,7 @@ void VelvetUI::system_adjust(int delta) {
         if (device_->is_demo() && device_->volume() >= 0) sound_->set_gain(device_->volume() / 100.0f);
     }
     sound_->play(Sfx::Move);
+    sys_vals_at_ = 0;   // read the new values back
     system_render();
 }
 
@@ -5309,12 +5822,9 @@ float egg_qr_target(int view) { return view == 2 ? 320 - 8 - egg_qr_size() : 18;
 
 void VelvetUI::mod_tap(int which) {
     if (page_kind_ != Page::System || egg_ || transitioning_) { egg_pos_ = 0; return; }
-    static const int kSeq[5] = {1, 2, 3, 4, 5};
-    egg_pos_ = which == kSeq[egg_pos_] ? egg_pos_ + 1 : (which == kSeq[0] ? 1 : 0);
-    if (egg_pos_ == 5) {
-        egg_pos_ = 0;
-        egg_open();
-    }
+    // The credits open with ALT on this page. (The old SYM, Aa, fn, ctrl, alt sequence could
+    // never finish on the real keyboard: its chip keeps Aa and fn to itself and reports nothing.)
+    if (which == 5) egg_open();
 }
 
 void VelvetUI::egg_open() {
@@ -5729,6 +6239,7 @@ bool VelvetUI::handle_key(uint32_t key, bool long_pressed) {
                     const int v = self->device_->volume();
                     if (v >= 0) { self->gvol_ = v; self->device_->set_volume(v); }
                     self->osd_volume(v);
+                    self->sys_vals_at_ = 0;
                     if (self->page_kind_ == Page::Music && !self->mus_vid_) self->music_render();
                     else if (self->page_kind_ == Page::System) self->system_render();
                 },
@@ -5760,6 +6271,8 @@ bool VelvetUI::handle_key(uint32_t key, bool long_pressed) {
     // The Wi-Fi page owns its keys first (text entry, overlays, long Backspace).
     if (page_kind_ == Page::Wifi && !transitioning_ && wifi_key(key, long_pressed)) return true;
     if (page_kind_ == Page::Net && !transitioning_ && net_key(key, long_pressed)) return true;
+    // The Remote page too: names are typed, ESC goes back one screen, DEL deletes.
+    if (page_kind_ == Page::Remote && !transitioning_ && ir_key(key, long_pressed)) return true;
 
     if (key == LV_KEY_ESC && long_pressed) {
         hold_end();
@@ -6663,6 +7176,48 @@ const ShotStep kScript[] = {
     {LV_KEY_DOWN, 300, nullptr, nullptr},
     {LV_KEY_DOWN, 300, nullptr, nullptr},
     {LV_KEY_DOWN, 900, "73c-bluetooth-device", nullptr},
+    {LV_KEY_ESC, 800, nullptr, nullptr},
+    // Remote, with the demo backend (OPTIC_IR_DEMO=1): every screen once
+    {kGoto | P(Page::Remote), 500, "73d-remote-01-hub", nullptr},
+    {LV_KEY_ENTER, 1200, "73d-remote-02-list", nullptr},
+    {LV_KEY_DOWN, 200, nullptr, nullptr},
+    {LV_KEY_ENTER, 500, "73d-remote-03-buttons", nullptr},        // Living room TV
+    {LV_KEY_ENTER, 500, "73d-remote-04-sent", nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 300, "73d-remote-05-unknown-protocol", nullptr},
+    {LV_KEY_ENTER, 500, "73d-remote-06-cant-send", nullptr},      // a protocol this can't send
+    {LV_KEY_DEL, 400, "73d-remote-07-delete-ask", nullptr},
+    {LV_KEY_DEL, 400, "73d-remote-08-deleted", nullptr},
+    {LV_KEY_ENTER, 400, "73d-remote-09-listening", nullptr},      // "Record another button"
+    {0, 1800, "73d-remote-10-caught", nullptr},
+    {LV_KEY_ENTER, 300, nullptr, "Sleep"},
+    {0, 300, "73d-remote-11-name-button", nullptr},
+    {LV_KEY_ENTER, 500, "73d-remote-12-saved", nullptr},
+    {LV_KEY_ESC, 400, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_DOWN, 150, nullptr, nullptr},
+    {LV_KEY_ENTER, 300, nullptr, "Bedroom AC"},                   // "Record a new remote"
+    {0, 300, "73d-remote-13-new-name", nullptr},
+    {LV_KEY_ENTER, 2000, nullptr, nullptr},
+    {LV_KEY_NEXT, 400, "73d-remote-14-caught-raw", nullptr},      // TAB: keep the raw timings
+    {LV_KEY_ENTER, 300, nullptr, "Power"},
+    {LV_KEY_ENTER, 500, "73d-remote-15-new-remote", nullptr},
+    {LV_KEY_ESC, 400, nullptr, nullptr},
+    {LV_KEY_UP, 200, nullptr, nullptr},
+    {LV_KEY_ENTER, 500, "73d-remote-16-online-kinds", nullptr},   // "Find a device online"
+    {LV_KEY_UP, 200, nullptr, nullptr},
+    {LV_KEY_ENTER, 500, "73d-remote-17-online-brands", nullptr},  // TVs
+    {0, 400, "73d-remote-18-online-filter", "so"},               // typing filters the brands
+    {LV_KEY_ENTER, 500, "73d-remote-19-online-files", nullptr},   // Sony
+    {LV_KEY_DOWN, 200, nullptr, nullptr},
+    {LV_KEY_ENTER, 600, "73d-remote-20-online-saved", nullptr},
+    {LV_KEY_ESC, 400, nullptr, nullptr},
+    {LV_KEY_DEL, 400, "73d-remote-21-delete-remote-ask", nullptr},
+    {LV_KEY_DOWN, 300, nullptr, nullptr},
     {LV_KEY_ESC, 800, nullptr, nullptr},
     {kGoto | P(Page::Hdmi), 500, "74-hub-hdmi", nullptr},
     {LV_KEY_ENTER, 1500, "75-hdmi-off", nullptr},   // HDMI: a screen is plugged in, the desktop off

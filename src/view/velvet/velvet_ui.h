@@ -2,6 +2,7 @@
 #pragma once
 
 #include "btaudio.h"
+#include "ir.h"
 #include "device.h"
 #include "lvgl.h"
 #include "browser.h"
@@ -29,7 +30,7 @@ class AssetManager;
 
 namespace velvet {
 
-enum class Page { Hub, Stats, Wifi, System, Terminal, Camera, Sensors, Browser, Gallery, Music, Pwn, Net, Hdmi, Bluetooth };
+enum class Page { Hub, Stats, Wifi, System, Terminal, Camera, Sensors, Browser, Gallery, Music, Pwn, Net, Hdmi, Bluetooth, Remote };
 
 class VelvetUI {
 public:
@@ -225,6 +226,31 @@ private:
     lv_obj_t* bt_note_{};
     lv_timer_t* bt_timer_{};
     int bt_sel_{0}, bt_top_{0}, bt_beat_{0}, bt_hub_age_{0};
+    // the Remote page: saved infrared remotes, recording a button, the online database
+    void build_remote(lv_obj_t* p);
+    void ir_render();
+    void ir_render_rows();
+    void ir_sync();
+    bool ir_key(uint32_t key, bool long_pressed);
+    static void ir_tick_cb(lv_timer_t* t);
+    struct IrRow { int kind; int ref; std::string left, right; };
+    std::vector<IrRow> ir_rows();
+    void ir_set_hints(int id);
+    void ir_flash(const std::string& text);
+    void ir_leave_recording();
+    std::unique_ptr<Ir> ir_;
+    IrState ir_state_{};
+    lv_obj_t* ir_box_{};
+    lv_obj_t* ir_note_{};
+    lv_obj_t* ir_head_{};
+    lv_obj_t* ir_hint_{};
+    lv_timer_t* ir_timer_{};
+    int ir_view_{0}, ir_sel_{0}, ir_top_{0}, ir_hint_id_{-1}, ir_del_row_{-1};
+    uint32_t ir_del_at_{0}, ir_flash_at_{0}, ir_note_seen_{0}, ir_saved_seen_{0};
+    std::string ir_text_, ir_info_, ir_filter_, ir_target_, ir_flash_;
+    std::vector<std::string> ir_db_path_;   // the database folder shown: kind, brand, ...
+    std::vector<int> ir_db_sel_;            // the row that was chosen at each level above
+    bool ir_new_remote_{false}, ir_keep_raw_{false};
     void hdmi_render();
     void hdmi_toggle();
     static void hdmi_tick_cb(lv_timer_t* t);
@@ -536,6 +562,8 @@ private:
     int gvol_{-1}, gvol_unmuted_{50};   // the device's volume as last read / set here (-1: no mixer)
     std::string mus_prep_id_;           // the highlighted track, and how long it has been
     int mus_prep_n_{0};
+    int sys_bright_c_{-1}, sys_vol_c_{-1};
+    uint32_t sys_vals_at_{0};
     void osd_show(const std::string& text, int bar);
     void osd_volume(int v);
     void media_key(uint32_t key);

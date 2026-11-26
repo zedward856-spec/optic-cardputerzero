@@ -634,5 +634,14 @@ target_link_libraries(${PROJECT_NAME}
         ${PROJECT_NAME}_viewmodel
 )
 
+# The Remote page's protocol and file-format checks (desktop only): build/desktop/ir_selftest
+if(USE_DESKTOP)
+    add_executable(ir_selftest EXCLUDE_FROM_ALL src/view/velvet/ir.cpp)
+    target_compile_definitions(ir_selftest PRIVATE OPTIC_IR_SELFTEST=1 OPTIC_IR_SELFTEST_MAIN=1)
+    target_compile_options(ir_selftest PRIVATE -Wall -Wextra)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ir_selftest PRIVATE Threads::Threads)
+endif()
+
 # Package deb
 include(cmake/cm0-package.cmake)
