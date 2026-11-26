@@ -530,6 +530,7 @@ constexpr int32_t kHubDy = 24;   // menu row spacing
 constexpr int32_t kHubRowH = 22; // a row's pill
 constexpr int kWifiRows = 4;     // visible network rows
 constexpr size_t kMaxPassword = 63;
+constexpr size_t kMaxEapField = 96;   // identity / anonymous identity / password of an enterprise login
 
 struct Stat {
     const char* name;
@@ -1869,7 +1870,7 @@ void VelvetUI::wifi_render_list() {
         lv_obj_set_style_bg_opa(r.plate, sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_label_set_text(r.name, ap.ssid.c_str());
         lv_obj_set_style_text_color(r.name, C(sel ? kInk : kWhite), 0);
-        lv_label_set_text(r.tag, ap.active ? "On" : ap.saved ? "Saved" : "");
+        lv_label_set_text(r.tag, ap.active ? "On" : ap.saved ? "Saved" : ap.enterprise ? "Login" : "");
         lv_obj_set_style_text_color(r.tag, C(sel ? kInk : ap.active ? kWhite : kGrey), 0);
         lv_obj_set_x(r.tag, 262 - utf8_cols(lv_label_get_text(r.tag)) * 8);
         if (ap.secure) lv_obj_remove_flag(r.lock, LV_OBJ_FLAG_HIDDEN);
@@ -1892,6 +1893,8 @@ void VelvetUI::wifi_close_overlay() {
     wifi_action_labels_.clear();
     wifi_pw_label_ = nullptr;
     wifi_pw_info_ = nullptr;
+    wifi_eap_info_ = nullptr;
+    for (int i = 0; i < kEapRows; ++i) wifi_eap_plates_[i] = wifi_eap_names_[i] = wifi_eap_values_[i] = nullptr;
     wifi_result_until_ = 0;
     wifi_mode_ = WifiMode::List;
     wifi_set_hints({{"OK", "Join"}, {"R", "Scan"}, {"W", "Radio"}});
@@ -1993,6 +1996,69 @@ void VelvetUI::wifi_render_password() {
     lv_label_set_text(wifi_pw_label_, shown.c_str());
 }
 
+// WPA-Enterprise login: four rows on the same card as the password entry. Up / down pick a row,
+// typing edits it, OK goes on to the next row and joins from the last one (the method).
+void VelvetUI::wifi_open_eap() {
+    wifi_target_ = wifi_aps_[wifi_sel_].ssid;
+    wifi_eap_ = WifiEap{};
+    wifi_eap_sel_ = 0;
+    wifi_show_pw_ = false;
+
+    wifi_close_overlay();
+    wifi_mode_ = WifiMode::Eap;
+    wifi_overlay_ = dim_layer(page_);
+    lv_obj_t* box = pill(wifi_overlay_, 4, 2, 312, 112, kDark, 12);
+    lv_obj_t* name = label(box, wifi_target_.c_str(), f_.mono10, kGrey, 12, 5);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(name, 136);
+    wifi_eap_info_ = label(box, "", f_.mono10, kGrey, 152, 5);
+    lv_obj_set_width(wifi_eap_info_, 148);
+    lv_obj_set_style_text_align(wifi_eap_info_, LV_TEXT_ALIGN_RIGHT, 0);
+    static const char* const kNames[kEapRows] = {"Identity", "Anonymous", "Password", "Method"};
+    for (int i = 0; i < kEapRows; ++i) {
+        lv_obj_t* plate = pill(box, 6, 21 + i * 22, 300, 20, kWhite);
+        wifi_eap_plates_[i] = plate;
+        wifi_eap_names_[i] = label(plate, kNames[i], f_.mono10, kGrey, 8, 3);
+        wifi_eap_values_[i] = label(plate, "", f_.mono12, kWhite, 86, 2);
+    }
+    wifi_eap_hints();
+    wifi_render_eap();
+}
+
+void VelvetUI::wifi_eap_hints() {
+    if (wifi_eap_sel_ == kEapRows - 1) wifi_set_hints({{"OK", "Join"}, {"\xE2\x86\x90\xE2\x86\x92", "Method"}, {"ESC", "Cancel"}});
+    else if (wifi_eap_sel_ == 2) wifi_set_hints({{"OK", "Next"}, {"TAB", "Show"}, {"ESC", "Cancel"}});
+    else wifi_set_hints({{"OK", "Next"}, {"\xE2\x86\x91\xE2\x86\x93", "Field"}, {"ESC", "Cancel"}});
+}
+
+void VelvetUI::wifi_render_eap() {
+    if (!wifi_eap_plates_[0]) return;
+    const bool cursor_on = (lv_tick_get() / 400) % 2 == 0;
+    for (int i = 0; i < kEapRows; ++i) {
+        const bool sel = i == wifi_eap_sel_;
+        std::string shown;
+        bool faint = false;
+        if (i == 3) {
+            shown = wifi_eap_.method == WifiEap::Method::TtlsPap ? "TTLS / PAP" : "PEAP / MSCHAPv2";
+        } else {
+            const std::string& v = i == 0 ? wifi_eap_.identity : i == 1 ? wifi_eap_.anonymous : wifi_eap_.password;
+            shown = i == 2 && !wifi_show_pw_ ? std::string(v.size(), '*') : v;
+            // show the end of long values: 25 columns and the cursor fit in the row
+            if (shown.size() > 25) shown = shown.substr(shown.size() - 25);
+            if (sel) {
+                shown += cursor_on ? "_" : " ";
+            } else if (v.empty()) {
+                shown = i == 1 ? "none" : "";
+                faint = true;
+            }
+        }
+        lv_obj_set_style_bg_opa(wifi_eap_plates_[i], sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_color(wifi_eap_names_[i], C(sel ? kInk : kGrey), 0);
+        lv_obj_set_style_text_color(wifi_eap_values_[i], C(sel ? kInk : faint ? kFaint : kWhite), 0);
+        lv_label_set_text(wifi_eap_values_[i], shown.c_str());
+    }
+}
+
 void VelvetUI::wifi_connect(const std::string& password) {
     const uint32_t gen = wifi_gen_;
     wifi_busy("Connecting");
@@ -2041,6 +2107,7 @@ void VelvetUI::wifi_tick_cb(lv_timer_t* t) {
         else lv_obj_add_flag(self->wifi_scan_label_, LV_OBJ_FLAG_HIDDEN);
     }
     if (self->wifi_mode_ == WifiMode::Password) self->wifi_render_password();
+    if (self->wifi_mode_ == WifiMode::Eap) self->wifi_render_eap();
     if (self->wifi_result_until_ && static_cast<int32_t>(lv_tick_get() - self->wifi_result_until_) >= 0) {
         self->wifi_close_overlay();
         self->wifi_render_list();
@@ -2092,6 +2159,71 @@ bool VelvetUI::wifi_key(uint32_t key, bool long_pressed) {
             wifi_render_password();
             return true;
 
+        case WifiMode::Eap: {
+            const bool method_row = wifi_eap_sel_ == kEapRows - 1;
+            std::string* field = wifi_eap_sel_ == 0 ? &wifi_eap_.identity
+                               : wifi_eap_sel_ == 1 ? &wifi_eap_.anonymous
+                               : wifi_eap_sel_ == 2 ? &wifi_eap_.password : nullptr;
+            auto flip_method = [this] {
+                wifi_eap_.method = wifi_eap_.method == WifiEap::Method::PeapMschapv2 ? WifiEap::Method::TtlsPap
+                                                                                     : WifiEap::Method::PeapMschapv2;
+                sound_->play(Sfx::Move);
+            };
+            auto go = [this](int row) {
+                wifi_eap_sel_ = (row + kEapRows) % kEapRows;
+                sound_->play(Sfx::Move);
+                wifi_eap_hints();
+            };
+            if (long_pressed) {
+                if (key == LV_KEY_BACKSPACE && field) field->clear();
+                wifi_render_eap();
+                return true;
+            }
+            if (wifi_eap_info_) lv_label_set_text(wifi_eap_info_, "");
+            if (key == LV_KEY_ESC) {
+                wifi_eap_ = WifiEap{};   // the login is not kept once the form is gone
+                wifi_close_overlay();
+                return true;
+            } else if (key == LV_KEY_UP) {
+                go(wifi_eap_sel_ - 1);
+            } else if (key == LV_KEY_DOWN) {
+                go(wifi_eap_sel_ + 1);
+            } else if (key == LV_KEY_NEXT) {
+                wifi_show_pw_ = !wifi_show_pw_;
+                if (wifi_eap_info_) lv_label_set_text(wifi_eap_info_, wifi_show_pw_ ? "Password shown" : "Password hidden");
+            } else if (method_row && (key == LV_KEY_LEFT || key == LV_KEY_RIGHT || is_left(key) || is_right(key))) {
+                flip_method();
+            } else if (key == LV_KEY_ENTER && !method_row) {
+                go(wifi_eap_sel_ + 1);
+            } else if (key == LV_KEY_ENTER) {
+                const int missing = wifi_eap_.identity.empty() ? 0 : wifi_eap_.password.empty() ? 2 : -1;
+                if (missing >= 0) {
+                    sound_->play(Sfx::Error);
+                    wifi_eap_sel_ = missing;
+                    wifi_eap_hints();
+                    if (wifi_eap_info_) lv_label_set_text(wifi_eap_info_, missing == 0 ? "Needs an identity" : "Needs a password");
+                    wifi_render_eap();
+                    return true;
+                }
+                const WifiEap login = std::move(wifi_eap_);
+                wifi_eap_ = WifiEap{};   // don't keep the password around after handing it over
+                const uint32_t gen = wifi_gen_;
+                wifi_busy("Connecting");
+                device_->wifi_connect_eap(wifi_target_, login, [this, gen](bool ok, const std::string& msg) {
+                    if (gen == wifi_gen_) wifi_result(ok, msg);
+                });
+                return true;
+            } else if (field && key >= 32 && key <= 126 && field->size() < kMaxEapField) {
+                *field += static_cast<char>(key);
+                sound_->play(Sfx::Key);
+            } else if (field && key == LV_KEY_BACKSPACE) {
+                if (!field->empty()) field->pop_back();
+                sound_->play(Sfx::Key);
+            }
+            wifi_render_eap();
+            return true;
+        }
+
         case WifiMode::Actions:
             if (long_pressed) return true;
             if (key == LV_KEY_ESC || key == LV_KEY_BACKSPACE) {
@@ -2137,6 +2269,8 @@ bool VelvetUI::wifi_key(uint32_t key, bool long_pressed) {
                 sound_->play(Sfx::Open);
                 if (ap.saved || ap.active) {
                     wifi_open_actions();
+                } else if (ap.enterprise) {
+                    wifi_open_eap();
                 } else if (ap.secure) {
                     wifi_open_password();
                 } else {
@@ -6331,6 +6465,19 @@ const ShotStep kScript[] = {
     {0, 2600, "19-wifi-after", nullptr},
     {LV_KEY_ENTER, 500, "20-wifi-actions", nullptr},
     {LV_KEY_ESC, 300, nullptr, nullptr},
+    {LV_KEY_DOWN, 400, "20a-wifi-eap-list", nullptr},   // CampusNet: WPA-Enterprise, asks for a login
+    {LV_KEY_ENTER, 500, "20b-wifi-eap-form", nullptr},
+    {0, 200, nullptr, "s1012345@campus.example"},
+    {LV_KEY_DOWN, 200, nullptr, "anonymous@campus.example"},
+    {LV_KEY_DOWN, 400, "20c-wifi-eap-filled", "notMyRealPw#7"},
+    {LV_KEY_NEXT, 400, "20d-wifi-eap-shown", nullptr},
+    {LV_KEY_NEXT, 200, nullptr, nullptr},
+    {LV_KEY_ENTER, 300, nullptr, nullptr},              // on to the method row
+    {LV_KEY_RIGHT, 400, "20e-wifi-eap-method", nullptr},   // TTLS / PAP
+    {LV_KEY_RIGHT, 300, nullptr, nullptr},              // back to PEAP / MSCHAPv2
+    {LV_KEY_ENTER, 700, "20f-wifi-eap-connecting", nullptr},
+    {0, 1500, "20g-wifi-eap-connected", nullptr},
+    {0, 2600, "20h-wifi-eap-after", nullptr},
     {LV_KEY_ESC, 900, "81-net-back", nullptr},   // back in NETWORK
     {LV_KEY_DOWN, 150, nullptr, nullptr},
     {LV_KEY_ENTER, 700, "82-net-eth", nullptr},

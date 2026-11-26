@@ -20,6 +20,16 @@ struct WifiAp {
     bool secure{false};   // needs a password
     bool saved{false};    // NetworkManager already has a profile for it
     bool active{false};   // currently connected
+    bool enterprise{false};  // WPA2/WPA3-Enterprise (802.1X): a login (identity + password), not one shared key
+};
+
+// The login for a WPA-Enterprise (802.1X) network: school / company / eduroam style.
+struct WifiEap {
+    enum class Method { PeapMschapv2, TtlsPap };
+    std::string identity;    // the inner (real) user name, sent inside the TLS tunnel
+    std::string anonymous;   // the outer identity, sent in the clear before the tunnel; "" = not set
+    std::string password;
+    Method method{Method::PeapMschapv2};
 };
 
 struct NetStatus {
@@ -57,6 +67,9 @@ public:
     virtual void wifi_scan(std::function<void(std::vector<WifiAp>)> cb) = 0;
     // Empty password = use the saved profile, or join an open network.
     virtual void wifi_connect(const std::string& ssid, const std::string& password, Done cb) = 0;
+    // Join a WPA-Enterprise network with a login. The server's certificate is NOT checked (there is
+    // no way to pick a CA here): see LinuxDevice::wifi_connect_eap for what that means.
+    virtual void wifi_connect_eap(const std::string& ssid, const WifiEap& eap, Done cb) = 0;
     virtual void wifi_disconnect(Done cb) = 0;
     virtual void wifi_forget(const std::string& ssid, Done cb) = 0;
     virtual void wifi_set_radio(bool on, Done cb) = 0;

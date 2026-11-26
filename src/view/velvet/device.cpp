@@ -93,6 +93,7 @@ public:
         aps_ = {
             {"Zedward-5G", 86, true, true, true},
             {"CafeNet", 64, true, false, false},
+            {"CampusNet", 58, true, false, false, true},   // WPA-Enterprise: asks for a login
             {"Library-Guest", 52, false, false, false},
             {"Neighbor_2.4", 38, true, false, false},
             {"ESP32-LoRa-AP", 30, true, false, false},
@@ -119,7 +120,10 @@ public:
         auto it = find(ssid);
         bool ok = it != aps_.end();
         std::string msg = ok ? "" : "Network not found";
-        if (ok && it->secure && !it->saved && pw.size() < 8) {
+        if (ok && it->enterprise && !it->saved) {
+            ok = false;
+            msg = "Needs a login";
+        } else if (ok && it->secure && !it->saved && pw.size() < 8) {
             ok = false;
             msg = "Password needs 8+ characters";
         } else if (ok && ssid == "Neighbor_2.4") {
@@ -131,6 +135,25 @@ public:
             it->active = true;
             it->saved = true;
             status_ = {true, true, ssid, "192.168.1." + std::to_string(20 + std::rand() % 200), it->signal};
+            msg = "Connected";
+        }
+        UiQueue::later(1800, [cb, ok, msg] { cb(ok, msg); });
+    }
+
+    // The made-up enterprise network takes any login that has an identity and a password.
+    void wifi_connect_eap(const std::string& ssid, const WifiEap& eap, Done cb) override {
+        auto it = find(ssid);
+        bool ok = it != aps_.end() && it->enterprise;
+        std::string msg = ok ? "" : "Network not found";
+        if (ok && (eap.identity.empty() || eap.password.empty())) {
+            ok = false;
+            msg = "Wrong identity or password";
+        }
+        if (ok) {
+            for (auto& ap : aps_) ap.active = false;
+            it->active = true;
+            it->saved = true;
+            status_ = {true, true, ssid, "10.20." + std::to_string(1 + std::rand() % 200) + ".57", it->signal};
             msg = "Connected";
         }
         UiQueue::later(1800, [cb, ok, msg] { cb(ok, msg); });
@@ -238,6 +261,7 @@ public:
         });
     }
     void wifi_connect(const std::string&, const std::string&, Done cb) override { panel(cb); }
+    void wifi_connect_eap(const std::string&, const WifiEap&, Done cb) override { panel(cb); }
     void wifi_disconnect(Done cb) override { panel(cb); }
     void wifi_forget(const std::string&, Done cb) override { panel(cb); }
     void wifi_set_radio(bool, Done cb) override { panel(cb); }
@@ -404,6 +428,42 @@ NetStatus query_status() {
     return st;
 }
 
+// A file only this user can read, in a fresh private directory, holding `text` for one nmcli
+// call (nmcli's passwd-file). Kept on tmpfs when there is one, and removed by the destructor.
+class SecretFile {
+public:
+    explicit SecretFile(const std::string& text) {
+        const char* rt = std::getenv("XDG_RUNTIME_DIR");   // tmpfs, already private to the user
+        std::string tmpl = std::string(rt && rt[0] == '/' ? rt : "/tmp") + "/velvet-nm-XXXXXX";
+        if (!mkdtemp(tmpl.data())) return;                 // mode 0700
+        dir_ = tmpl;
+        const std::string path = dir_ + "/secret";
+        const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) return;
+        path_ = path;
+        size_t off = 0;
+        while (off < text.size()) {
+            const ssize_t n = write(fd, text.data() + off, text.size() - off);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            off += static_cast<size_t>(n);
+        }
+        ok_ = close(fd) == 0 && off == text.size();
+    }
+    ~SecretFile() {
+        if (!path_.empty()) unlink(path_.c_str());
+        if (!dir_.empty()) rmdir(dir_.c_str());
+    }
+    SecretFile(const SecretFile&) = delete;
+    SecretFile& operator=(const SecretFile&) = delete;
+    bool ok() const { return ok_; }
+    const std::string& path() const { return path_; }
+
+private:
+    std::string dir_, path_;
+    bool ok_{false};
+};
+
 std::vector<WifiAp> query_scan() {
     std::map<std::string, bool> saved;
     for (const auto& l : lines(run({"nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"}).out)) {
@@ -420,6 +480,8 @@ std::vector<WifiAp> query_scan() {
         ap.ssid = f[1];
         ap.signal = std::atoi(f[2].c_str());
         ap.secure = !f[3].empty() && f[3] != "--";
+        // nmcli writes "WPA2 802.1X" / "WPA3 802.1X" for enterprise networks
+        ap.enterprise = f[3].find("802.1X") != std::string::npos || f[3].find("EAP") != std::string::npos;
         ap.saved = saved.count(ap.ssid) > 0;
         // one row per SSID: keep the strongest / active access point
         auto it = std::find_if(aps.begin(), aps.end(), [&](const WifiAp& a) { return a.ssid == ap.ssid; });
@@ -428,6 +490,7 @@ std::vector<WifiAp> query_scan() {
         } else {
             it->active = it->active || ap.active;
             it->signal = std::max(it->signal, ap.signal);
+            it->enterprise = it->enterprise || ap.enterprise;
         }
     }
     std::stable_sort(aps.begin(), aps.end(), [](const WifiAp& a, const WifiAp& b) {
@@ -468,6 +531,67 @@ public:
             if (!ok && msg.find("Secrets were required") != std::string::npos) msg = "Wrong password";
             if (!ok && !pw.empty()) {
                 // don't keep a profile with a bad password: the next try should ask again
+                run({"nmcli", "connection", "delete", "id", ssid});
+            }
+            if (!ok && msg.empty()) msg = "Failed (code " + std::to_string(r.code) + ")";
+            return [cb, ok, msg] { cb(ok, msg); };
+        });
+    }
+
+    // WPA2/WPA3-Enterprise with a user name and password (PEAP/MSCHAPv2, or TTLS/PAP).
+    //
+    // SECURITY: the server's certificate is NOT validated. No CA certificate is set and
+    // 802-1x.system-ca-certs is "no", because this screen has no way to choose the school's CA.
+    // That is how most phones are set up for such networks, but it means an access point that
+    // merely uses the same network name can pose as the real one: it then sees the identity,
+    // and with PEAP/MSCHAPv2 a challenge/response that can be cracked offline for a weak
+    // password; with TTLS/PAP it sees the password itself. The traffic is still encrypted
+    // against other people on the network. To pin the CA later, on the device:
+    //   nmcli connection modify <ssid> 802-1x.ca-cert /path/ca.pem   (or 802-1x.system-ca-certs yes
+    //   together with 802-1x.domain-suffix-match <the school's radius domain>)
+    //
+    // The password never goes on a command line (those show in `ps`): the profile is made
+    // without it, and `connection up` reads it from a 0600 file in a private directory that is
+    // removed as soon as nmcli returns. NetworkManager then keeps it in its own root-only
+    // profile, like the pre-shared key of a home network, so the saved network reconnects.
+    // "wpa-eap" covers WPA2- and WPA3-Enterprise; the 192-bit WPA3 mode (wpa-eap-suite-b-192)
+    // needs certificates and is not offered.
+    void wifi_connect_eap(const std::string& ssid, const WifiEap& eap, Done cb) override {
+        async([cb, ssid, eap] {
+            const bool ttls = eap.method == WifiEap::Method::TtlsPap;
+            // a stale profile with an old login would win over the new one: drop it first
+            run({"nmcli", "connection", "delete", "id", ssid});
+            std::vector<std::string> add = {
+                "nmcli", "connection", "add", "type", "wifi", "con-name", ssid,
+                // not until the password is in: a new profile would be tried at once, without it
+                "autoconnect", "no", "ssid", ssid,
+                "802-11-wireless-security.key-mgmt", "wpa-eap",
+                "802-1x.eap", ttls ? "ttls" : "peap",
+                "802-1x.phase2-auth", ttls ? "pap" : "mschapv2",
+                "802-1x.identity", eap.identity,
+                "802-1x.system-ca-certs", "no",   // see SECURITY above
+            };
+            if (!eap.anonymous.empty()) {
+                add.push_back("802-1x.anonymous-identity");
+                add.push_back(eap.anonymous);
+            }
+            RunResult r = run(add);
+            if (r.code == 0) {
+                const SecretFile secret("802-1x.password:" + eap.password + "\n");
+                if (secret.ok()) {
+                    r = run({"nmcli", "-w", "45", "connection", "up", "id", ssid, "passwd-file", secret.path()});
+                } else {
+                    r.code = 1;
+                    r.out = "Could not hand over the password";
+                }
+            }
+            const bool ok = r.code == 0;
+            std::string msg = ok ? "Connected" : first_line(r.out);
+            if (!ok && msg.find("Secrets were required") != std::string::npos) msg = "Wrong identity or password";
+            if (ok) {
+                run({"nmcli", "connection", "modify", "id", ssid, "connection.autoconnect", "yes"});
+            } else {
+                // don't keep a half-made profile: the next try starts clean and asks again
                 run({"nmcli", "connection", "delete", "id", ssid});
             }
             if (!ok && msg.empty()) msg = "Failed (code " + std::to_string(r.code) + ")";

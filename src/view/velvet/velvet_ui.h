@@ -83,7 +83,7 @@ private:
     void wifi_set_hints(std::initializer_list<std::pair<const char*, const char*>> items);
 
     // wifi page
-    enum class WifiMode { List, Actions, Password, Busy };
+    enum class WifiMode { List, Actions, Password, Eap, Busy };
     void build_wifi(lv_obj_t* parent);
     bool wifi_key(uint32_t key, bool long_pressed);
     // NETWORK: a menu (Wi-Fi, Ethernet, Tor, Tailscale, Speed test, Tools) and their views
@@ -102,6 +102,9 @@ private:
     void wifi_run_action();
     void wifi_open_password();
     void wifi_render_password();
+    void wifi_open_eap();
+    void wifi_render_eap();
+    void wifi_eap_hints();
     void wifi_close_overlay();
     void wifi_connect(const std::string& password);
     void wifi_busy(const char* text);
@@ -306,6 +309,14 @@ private:
     bool wifi_show_pw_{false};
     lv_obj_t* wifi_pw_label_{};
     lv_obj_t* wifi_pw_info_{};
+    // the login form of a WPA-Enterprise network: identity, anonymous identity, password, method
+    static constexpr int kEapRows = 4;
+    WifiEap wifi_eap_;
+    int wifi_eap_sel_{0};
+    lv_obj_t* wifi_eap_plates_[kEapRows]{};
+    lv_obj_t* wifi_eap_names_[kEapRows]{};
+    lv_obj_t* wifi_eap_values_[kEapRows]{};
+    lv_obj_t* wifi_eap_info_{};
     lv_timer_t* wifi_timer_{};
     uint32_t wifi_result_until_{0};
 
